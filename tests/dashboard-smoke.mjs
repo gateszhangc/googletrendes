@@ -20,6 +20,21 @@ try {
     throw new Error(`expected 6 metrics, got ${metricCount}`);
   }
 
+  const selectedDate = await page.inputValue("#collectedDate");
+  if (!selectedDate) {
+    throw new Error("expected latest collected date to be selected by default");
+  }
+
+  const batchLabel = await page.textContent("#batchLabel");
+  if (!batchLabel || !batchLabel.includes(selectedDate)) {
+    throw new Error(`batch label did not include selected date: ${batchLabel}`);
+  }
+
+  const resultCount = await page.textContent("#resultCount");
+  if (!resultCount || !resultCount.includes("4,982")) {
+    throw new Error(`default view should be latest date only, got: ${resultCount}`);
+  }
+
   await page.fill("#search", "台風");
   await page.waitForFunction(() => {
     const rows = document.querySelector("#rows")?.textContent || "";
@@ -29,6 +44,26 @@ try {
   const rowText = await page.locator("#rows tr").first().innerText();
   if (!rowText.includes("台風")) {
     throw new Error(`filtered row did not contain query: ${rowText}`);
+  }
+
+  await page.fill("#search", "");
+  await page.waitForFunction(() => {
+    const resultCount = document.querySelector("#resultCount")?.textContent || "";
+    return resultCount.includes("4,982");
+  });
+
+  const initialRows = await page.locator("#rows tr").count();
+  await page.evaluate(() => {
+    const wrap = document.querySelector(".table-wrap");
+    wrap.scrollTop = wrap.scrollHeight;
+  });
+  await page.waitForFunction(() => {
+    const pageInfo = document.querySelector("#pageInfo")?.textContent || "";
+    return pageInfo.trim().startsWith("2 /");
+  });
+  const rowsAfterAutoLoad = await page.locator("#rows tr").count();
+  if (rowsAfterAutoLoad <= initialRows) {
+    throw new Error(`expected infinite scroll to append rows, got ${initialRows} -> ${rowsAfterAutoLoad}`);
   }
 } finally {
   await browser.close();

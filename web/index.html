@@ -18,6 +18,11 @@
       </div>
 
       <div class="filter-group">
+        <label>抓取日期</label>
+        <select id="collectedDate"><option value="">全部日期</option></select>
+      </div>
+
+      <div class="filter-group">
         <label>搜索</label>
         <input id="search" type="search" placeholder="关键词 / 翻译 / AI 翻译">
       </div>
@@ -56,7 +61,7 @@
     <main class="workspace">
       <header class="topbar">
         <div>
-          <p class="eyebrow">2026-06-04 抓取批次</p>
+          <p class="eyebrow" id="batchLabel">最新抓取批次</p>
           <h1>全球上升搜索查询</h1>
         </div>
         <div class="status-pill" id="status">读取中...</div>
@@ -104,6 +109,7 @@
                 <th>国家</th>
                 <th>分类</th>
                 <th>涨幅</th>
+                <th>日期</th>
                 <th>来源</th>
               </tr>
             </thead>

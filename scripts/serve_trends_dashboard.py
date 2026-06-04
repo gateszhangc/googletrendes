@@ -27,6 +27,11 @@ class TrendsHandler(BaseHTTPRequestHandler):
     def db(self):
         return connect(self.db_path, self.database_url)
 
+    def collected_date_sql(self, alias="sf"):
+        if self.database_url:
+            return f"substring({alias}.name from 22 for 10)"
+        return f"substr({alias}.name, 22, 10)"
+
     def send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -76,9 +81,12 @@ class TrendsHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(error)}, status=503)
 
     def api_summary(self):
+        params = parse_qs(urlparse(self.path).query)
+        where, values = self.date_clause(params, "sf")
+        clause = f"where {' and '.join(where)}" if where else ""
         with self.db() as conn:
             summary = conn.execute(
-                """
+                f"""
                 select
                   count(*) as rows,
                   count(distinct query) as unique_queries,
@@ -86,10 +94,21 @@ class TrendsHandler(BaseHTTPRequestHandler):
                   count(distinct category) as categories,
                   sum(case when change_is_breakout = 1 then 1 else 0 end) as breakouts,
                   sum(case when coalesce(translation_ai, '') <> '' then 1 else 0 end) as translated_rows
-                from trend_queries
-                """
+                from trend_queries tq
+                join source_files sf on sf.id = tq.source_file_id
+                {clause}
+                """,
+                values,
             ).fetchone()
-            files = conn.execute("select count(*) as files from source_files").fetchone()["files"]
+            files = conn.execute(
+                f"""
+                select count(distinct sf.id) as files
+                from source_files sf
+                join trend_queries tq on tq.source_file_id = sf.id
+                {clause}
+                """,
+                values,
+            ).fetchone()["files"]
             summary["files"] = files
             summary["translated_rate"] = round(
                 (summary["translated_rows"] or 0) / summary["rows"] * 100, 1
@@ -97,7 +116,18 @@ class TrendsHandler(BaseHTTPRequestHandler):
             self.send_json(summary)
 
     def api_facets(self):
+        date_expr = self.collected_date_sql("sf")
         with self.db() as conn:
+            collected_dates = conn.execute(
+                f"""
+                select {date_expr} as value, count(*) as count
+                from trend_queries tq
+                join source_files sf on sf.id = tq.source_file_id
+                group by value
+                order by value desc
+                """
+            ).fetchall()
+            latest_collected_date = collected_dates[0]["value"] if collected_dates else ""
             geos = conn.execute(
                 "select geo as value, count(*) as count from trend_queries group by geo order by count desc, geo"
             ).fetchall()
@@ -107,33 +137,53 @@ class TrendsHandler(BaseHTTPRequestHandler):
             dates = conn.execute(
                 "select date_range as value, count(*) as count from trend_queries group by date_range order by value"
             ).fetchall()
-            self.send_json({"geos": geos, "categories": categories, "dates": dates})
+            self.send_json({
+                "geos": geos,
+                "categories": categories,
+                "dates": dates,
+                "collected_dates": collected_dates,
+                "latest_collected_date": latest_collected_date,
+            })
 
     def api_chart(self):
+        params = parse_qs(urlparse(self.path).query)
+        where, values = self.date_clause(params, "sf")
+        clause = f"where {' and '.join(where)}" if where else ""
         with self.db() as conn:
             by_geo = conn.execute(
-                """
+                f"""
                 select geo as label, count(*) as value
-                from trend_queries
+                from trend_queries tq
+                join source_files sf on sf.id = tq.source_file_id
+                {clause}
                 group by geo
                 order by value desc, geo
                 limit 12
-                """
+                """,
+                values,
             ).fetchall()
             by_category = conn.execute(
-                """
+                f"""
                 select category as label, count(*) as value
-                from trend_queries
+                from trend_queries tq
+                join source_files sf on sf.id = tq.source_file_id
+                {clause}
                 group by category
                 order by value desc, category
                 limit 12
-                """
+                """,
+                values,
             ).fetchall()
             self.send_json({"by_geo": by_geo, "by_category": by_category})
 
+    def date_clause(self, params, source_alias):
+        value = (params.get("collected_date", [""])[0] or "").strip()
+        if not value:
+            return [], []
+        return [f"{self.collected_date_sql(source_alias)} = {placeholder(self.database_url)}"], [value]
+
     def api_trends(self, params):
-        where = []
-        values = []
+        where, values = self.date_clause(params, "sf")
 
         search = (params.get("search", [""])[0] or "").strip()
         if search:
@@ -170,7 +220,15 @@ class TrendsHandler(BaseHTTPRequestHandler):
         mark = placeholder(self.database_url)
 
         with self.db() as conn:
-            total = conn.execute(f"select count(*) as total from trend_queries {clause}", values).fetchone()["total"]
+            total = conn.execute(
+                f"""
+                select count(*) as total
+                from trend_queries tq
+                join source_files sf on sf.id = tq.source_file_id
+                {clause}
+                """,
+                values,
+            ).fetchone()["total"]
             rows = conn.execute(
                 f"""
                 select
@@ -184,7 +242,8 @@ class TrendsHandler(BaseHTTPRequestHandler):
                   tq.change_label,
                   tq.change_value,
                   tq.change_is_breakout,
-                  sf.name as source_file
+                  sf.name as source_file,
+                  {self.collected_date_sql("sf")} as collected_date
                 from trend_queries tq
                 join source_files sf on sf.id = tq.source_file_id
                 {clause}

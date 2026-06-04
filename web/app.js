@@ -2,10 +2,13 @@ const state = {
   offset: 0,
   limit: 80,
   total: 0,
+  latestCollectedDate: "",
+  loadingRows: false,
+  loadedUntil: 0,
 };
 
 const el = (id) => document.getElementById(id);
-const filters = ["search", "geo", "category", "translated", "change"];
+const filters = ["collectedDate", "search", "geo", "category", "translated", "change"];
 
 function formatNumber(value) {
   return new Intl.NumberFormat("zh-CN").format(value || 0);
@@ -30,7 +33,7 @@ function params() {
   const query = new URLSearchParams();
   for (const id of filters) {
     const value = el(id).value.trim();
-    if (value) query.set(id, value);
+    if (value) query.set(id === "collectedDate" ? "collected_date" : id, value);
   }
   query.set("limit", state.limit);
   query.set("offset", state.offset);
@@ -45,7 +48,9 @@ function metric(label, value, tone) {
 }
 
 async function loadSummary() {
-  const summary = await getJson("/api/summary");
+  const query = new URLSearchParams();
+  if (el("collectedDate").value) query.set("collected_date", el("collectedDate").value);
+  const summary = await getJson(`/api/summary?${query.toString()}`);
   el("metrics").innerHTML = [
     metric("总记录", formatNumber(summary.rows), "#6c8cff"),
     metric("唯一查询", formatNumber(summary.unique_queries), "#34d3c7"),
@@ -58,8 +63,14 @@ async function loadSummary() {
 
 async function loadFacets() {
   const facets = await getJson("/api/facets");
+  state.latestCollectedDate = facets.latest_collected_date || "";
+  fillSelect("collectedDate", "全部日期", facets.collected_dates);
+  if (state.latestCollectedDate && !el("collectedDate").value) {
+    el("collectedDate").value = state.latestCollectedDate;
+  }
   fillSelect("geo", "全部国家", facets.geos);
   fillSelect("category", "全部分类", facets.categories);
+  renderBatchLabel();
 }
 
 function fillSelect(id, label, rows) {
@@ -84,17 +95,21 @@ function renderBars(containerId, rows) {
 }
 
 async function loadCharts() {
-  const chart = await getJson("/api/chart");
+  const query = new URLSearchParams();
+  if (el("collectedDate").value) query.set("collected_date", el("collectedDate").value);
+  const chart = await getJson(`/api/chart?${query.toString()}`);
   renderBars("geoChart", chart.by_geo);
   renderBars("categoryChart", chart.by_category);
 }
 
-function renderRows(rows) {
+function renderRows(rows, append = false) {
   if (!rows.length) {
-    el("rows").innerHTML = `<tr><td colspan="7"><div class="empty">没有匹配记录</div></td></tr>`;
+    if (!append) {
+      el("rows").innerHTML = `<tr><td colspan="8"><div class="empty">没有匹配记录</div></td></tr>`;
+    }
     return;
   }
-  el("rows").innerHTML = rows.map((row) => `
+  const html = rows.map((row) => `
     <tr>
       <td class="query">${escapeHtml(row.query)}</td>
       <td class="translation">${escapeHtml(row.translation_ai || "")}</td>
@@ -102,25 +117,55 @@ function renderRows(rows) {
       <td>${escapeHtml(row.geo)}</td>
       <td>${escapeHtml(row.category)}</td>
       <td>${escapeHtml(row.change_label)}</td>
+      <td>${escapeHtml(row.collected_date || "")}</td>
       <td>${escapeHtml(row.source_file)}</td>
     </tr>
   `).join("");
+  if (append) {
+    el("rows").insertAdjacentHTML("beforeend", html);
+  } else {
+    el("rows").innerHTML = html;
+  }
 }
 
-async function loadRows() {
+async function loadRows({ append = false } = {}) {
+  if (state.loadingRows) return;
+  state.loadingRows = true;
   el("status").textContent = "读取中...";
-  const data = await getJson(`/api/trends?${params().toString()}`);
-  state.total = data.total;
-  renderRows(data.rows);
-  const start = data.total ? data.offset + 1 : 0;
-  const end = Math.min(data.offset + data.limit, data.total);
-  el("resultCount").textContent = `${formatNumber(data.total)} 条记录，当前 ${start}-${end}`;
-  const page = Math.floor(data.offset / data.limit) + 1;
-  const pages = Math.max(1, Math.ceil(data.total / data.limit));
-  el("pageInfo").textContent = `${page} / ${pages}`;
-  el("prev").disabled = data.offset <= 0;
-  el("next").disabled = data.offset + data.limit >= data.total;
-  el("status").textContent = "已同步数据";
+  try {
+    const data = await getJson(`/api/trends?${params().toString()}`);
+    state.total = data.total;
+    renderRows(data.rows, append);
+    state.loadedUntil = append
+      ? Math.min(state.loadedUntil + data.rows.length, data.total)
+      : Math.min(data.offset + data.rows.length, data.total);
+    const start = data.total ? 1 : 0;
+    const end = state.loadedUntil;
+    el("resultCount").textContent = `${formatNumber(data.total)} 条记录，已加载 ${start}-${end}`;
+    const loadedPages = Math.max(1, Math.ceil(state.loadedUntil / state.limit));
+    const pages = Math.max(1, Math.ceil(data.total / data.limit));
+    el("pageInfo").textContent = `${loadedPages} / ${pages}`;
+    el("prev").disabled = state.offset <= 0;
+    el("next").disabled = state.loadedUntil >= data.total;
+    el("status").textContent = "已同步数据";
+    renderBatchLabel();
+  } finally {
+    state.loadingRows = false;
+  }
+}
+
+function renderBatchLabel() {
+  const value = el("collectedDate").value;
+  el("batchLabel").textContent = value ? `${value} 抓取批次` : "全部抓取批次";
+}
+
+function scrollToTableTop() {
+  const panel = document.querySelector(".table-panel");
+  if (!panel) return;
+  window.scrollTo({
+    top: panel.getBoundingClientRect().top + window.scrollY,
+    behavior: "auto",
+  });
 }
 
 function debounce(fn, wait) {
@@ -132,8 +177,27 @@ function debounce(fn, wait) {
 }
 
 async function refresh(resetOffset = true) {
-  if (resetOffset) state.offset = 0;
+  if (resetOffset) {
+    state.offset = 0;
+    state.loadedUntil = 0;
+    el("rows").innerHTML = "";
+    const tableWrap = document.querySelector(".table-wrap");
+    if (tableWrap) tableWrap.scrollTop = 0;
+  }
   await Promise.all([loadSummary(), loadCharts(), loadRows()]);
+}
+
+async function loadNextPage() {
+  if (state.loadingRows || state.loadedUntil >= state.total) return;
+  state.offset = state.loadedUntil;
+  await loadRows({ append: true });
+}
+
+function maybeLoadNextFromTableScroll() {
+  const wrap = document.querySelector(".table-wrap");
+  if (!wrap) return;
+  const nearBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
+  if (nearBottom) loadNextPage();
 }
 
 function bindEvents() {
@@ -144,18 +208,19 @@ function bindEvents() {
   }
   el("reset").addEventListener("click", () => {
     for (const id of filters) el(id).value = "";
+    if (state.latestCollectedDate) el("collectedDate").value = state.latestCollectedDate;
     refresh(true);
   });
-  el("prev").addEventListener("click", () => {
+  el("prev").addEventListener("click", async () => {
     state.offset = Math.max(0, state.offset - state.limit);
-    loadRows();
+    state.loadedUntil = 0;
+    await loadRows();
+    document.querySelector(".table-wrap").scrollTop = 0;
   });
-  el("next").addEventListener("click", () => {
-    if (state.offset + state.limit < state.total) {
-      state.offset += state.limit;
-      loadRows();
-    }
+  el("next").addEventListener("click", async () => {
+    await loadNextPage();
   });
+  document.querySelector(".table-wrap").addEventListener("scroll", maybeLoadNextFromTableScroll);
 }
 
 async function boot() {
