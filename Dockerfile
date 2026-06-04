@@ -1,5 +1,9 @@
 FROM python:3.13-slim
 
+LABEL org.opencontainers.image.source="https://github.com/gateszhangc/googletrendes" \
+      org.opencontainers.image.description="Google Trends dashboard" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
