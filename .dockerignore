@@ -1,0 +1,9 @@
+.git
+__pycache__/
+*.pyc
+data/*.sqlite-shm
+data/*.sqlite-wal
+logs/
+container-output/
+node_modules/
+*.log

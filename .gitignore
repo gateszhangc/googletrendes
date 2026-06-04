@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+data/*.sqlite-shm
+data/*.sqlite-wal
+logs/
+container-output/
+node_modules/
+.DS_Store
+*.log
+google_trends_*.tsv
+google_trends_*.json
+google_trends_*.ndjson
+2026-*/
