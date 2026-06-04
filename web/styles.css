@@ -277,6 +277,22 @@ h1 {
   font-weight: 700;
 }
 
+.page-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.page-jump input {
+  width: 64px;
+  min-height: 34px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
 .table-wrap {
   overflow: auto;
   max-height: 58vh;
@@ -359,5 +375,9 @@ td.translation {
   .table-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .pager {
+    flex-wrap: wrap;
   }
 }

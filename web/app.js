@@ -40,6 +40,10 @@ function params() {
   return query;
 }
 
+function totalPages() {
+  return Math.max(1, Math.ceil(state.total / state.limit));
+}
+
 function metric(label, value, tone) {
   return `<article class="metric-card" style="border-top:4px solid ${tone}">
     <span>${label}</span>
@@ -139,14 +143,18 @@ async function loadRows({ append = false } = {}) {
     state.loadedUntil = append
       ? Math.min(state.loadedUntil + data.rows.length, data.total)
       : Math.min(data.offset + data.rows.length, data.total);
-    const start = data.total ? 1 : 0;
+    const start = data.total ? (append ? 1 : data.offset + 1) : 0;
     const end = state.loadedUntil;
-    el("resultCount").textContent = `${formatNumber(data.total)} 条记录，已加载 ${start}-${end}`;
+    const rangeLabel = append ? "已加载" : "当前";
+    el("resultCount").textContent = `${formatNumber(data.total)} 条记录，${rangeLabel} ${start}-${end}`;
     const loadedPages = Math.max(1, Math.ceil(state.loadedUntil / state.limit));
-    const pages = Math.max(1, Math.ceil(data.total / data.limit));
-    el("pageInfo").textContent = `${loadedPages} / ${pages}`;
+    const pages = totalPages();
+    el("pageJump").value = loadedPages;
+    el("pageJump").max = pages;
+    el("pageTotal").textContent = `/ ${pages}`;
     el("prev").disabled = state.offset <= 0;
     el("next").disabled = state.loadedUntil >= data.total;
+    el("jumpPage").disabled = data.total <= state.limit;
     el("status").textContent = "已同步数据";
     renderBatchLabel();
   } finally {
@@ -193,6 +201,19 @@ async function loadNextPage() {
   await loadRows({ append: true });
 }
 
+async function jumpToPage() {
+  const pages = totalPages();
+  const requested = Number.parseInt(el("pageJump").value, 10);
+  const page = Math.min(Math.max(Number.isFinite(requested) ? requested : 1, 1), pages);
+  state.offset = (page - 1) * state.limit;
+  state.loadedUntil = 0;
+  el("rows").innerHTML = "";
+  const tableWrap = document.querySelector(".table-wrap");
+  if (tableWrap) tableWrap.scrollTop = 0;
+  await loadRows();
+  scrollToTableTop();
+}
+
 function maybeLoadNextFromTableScroll() {
   const wrap = document.querySelector(".table-wrap");
   if (!wrap) return;
@@ -219,6 +240,13 @@ function bindEvents() {
   });
   el("next").addEventListener("click", async () => {
     await loadNextPage();
+  });
+  el("jumpPage").addEventListener("click", jumpToPage);
+  el("pageJump").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      jumpToPage();
+    }
   });
   document.querySelector(".table-wrap").addEventListener("scroll", maybeLoadNextFromTableScroll);
 }

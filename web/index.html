@@ -95,7 +95,12 @@
           </div>
           <div class="pager">
             <button id="prev" class="soft-button">上一页</button>
-            <span id="pageInfo">1 / 1</span>
+            <label class="page-jump">
+              <span>页</span>
+              <input id="pageJump" type="number" min="1" value="1">
+              <span id="pageTotal">/ 1</span>
+            </label>
+            <button id="jumpPage" class="soft-button">跳转</button>
             <button id="next" class="soft-button">下一页</button>
           </div>
         </div>

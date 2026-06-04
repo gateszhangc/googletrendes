@@ -58,13 +58,19 @@ try {
     wrap.scrollTop = wrap.scrollHeight;
   });
   await page.waitForFunction(() => {
-    const pageInfo = document.querySelector("#pageInfo")?.textContent || "";
-    return pageInfo.trim().startsWith("2 /");
+    return document.querySelector("#pageJump")?.value === "2";
   });
   const rowsAfterAutoLoad = await page.locator("#rows tr").count();
   if (rowsAfterAutoLoad <= initialRows) {
     throw new Error(`expected infinite scroll to append rows, got ${initialRows} -> ${rowsAfterAutoLoad}`);
   }
+
+  await page.fill("#pageJump", "12");
+  await page.click("#jumpPage");
+  await page.waitForFunction(() => {
+    const resultCount = document.querySelector("#resultCount")?.textContent || "";
+    return document.querySelector("#pageJump")?.value === "12" && resultCount.includes("881-960");
+  });
 } finally {
   await browser.close();
 }
