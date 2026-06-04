@@ -53,10 +53,12 @@ try {
   });
 
   const initialRows = await page.locator("#rows tr").count();
-  await page.evaluate(() => {
-    const wrap = document.querySelector(".table-wrap");
-    wrap.scrollTop = wrap.scrollHeight;
-  });
+  await page.locator(".table-wrap").hover();
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await page.mouse.wheel(0, 10000);
+    await page.waitForTimeout(300);
+    if (await page.inputValue("#pageJump") === "2") break;
+  }
   await page.waitForFunction(() => {
     return document.querySelector("#pageJump")?.value === "2";
   });
