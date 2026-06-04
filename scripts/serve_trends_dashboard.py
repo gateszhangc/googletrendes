@@ -247,7 +247,7 @@ class TrendsHandler(BaseHTTPRequestHandler):
                 from trend_queries tq
                 join source_files sf on sf.id = tq.source_file_id
                 {clause}
-                order by tq.change_is_breakout desc, coalesce(tq.change_value, 0) desc, tq.id asc
+                order by sf.path asc, tq.source_row asc
                 limit {mark} offset {mark}
                 """,
                 [*values, limit, offset],
