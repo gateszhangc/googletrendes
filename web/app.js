@@ -8,7 +8,7 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
-const filters = ["collectedDate", "search", "geo", "category", "translated", "change"];
+const filters = ["collectedDate", "search", "geo", "category", "queryMode", "translated", "change"];
 
 function formatNumber(value) {
   return new Intl.NumberFormat("zh-CN").format(value || 0);
@@ -33,7 +33,14 @@ function params() {
   const query = new URLSearchParams();
   for (const id of filters) {
     const value = el(id).value.trim();
-    if (value) query.set(id === "collectedDate" ? "collected_date" : id, value);
+    if (!value) continue;
+    if (id === "collectedDate") {
+      query.set("collected_date", value);
+    } else if (id === "queryMode" && value === "unique") {
+      query.set("unique", "yes");
+    } else if (id !== "queryMode") {
+      query.set(id, value);
+    }
   }
   query.set("limit", state.limit);
   query.set("offset", state.offset);

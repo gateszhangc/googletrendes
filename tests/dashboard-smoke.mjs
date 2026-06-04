@@ -35,6 +35,18 @@ try {
     throw new Error(`default view should be latest date only, got: ${resultCount}`);
   }
 
+  await page.selectOption("#queryMode", "unique");
+  await page.waitForFunction(() => {
+    const resultCount = document.querySelector("#resultCount")?.textContent || "";
+    return resultCount.includes("3,555");
+  });
+
+  await page.selectOption("#queryMode", "");
+  await page.waitForFunction(() => {
+    const resultCount = document.querySelector("#resultCount")?.textContent || "";
+    return resultCount.includes("4,982");
+  });
+
   await page.fill("#search", "台風");
   await page.waitForFunction(() => {
     const rows = document.querySelector("#rows")?.textContent || "";
