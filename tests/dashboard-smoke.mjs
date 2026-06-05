@@ -4,6 +4,7 @@ const baseUrl = process.env.DASHBOARD_URL || "http://127.0.0.1:9876";
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
+const formatNumber = (value) => new Intl.NumberFormat("zh-CN").format(value || 0);
 
 try {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
@@ -31,38 +32,53 @@ try {
   }
 
   const resultCount = await page.textContent("#resultCount");
-  if (!resultCount || !resultCount.includes("4,982")) {
+  const selectedDateSummary = await page.evaluate(async (date) => {
+    const response = await fetch(`/api/summary?collected_date=${encodeURIComponent(date)}`);
+    return response.json();
+  }, selectedDate);
+  const firstResult = await page.evaluate(async (date) => {
+    const response = await fetch(`/api/trends?collected_date=${encodeURIComponent(date)}&limit=1`);
+    return response.json();
+  }, selectedDate);
+  const searchTerm = firstResult.rows[0].query;
+  const selectedDateRows = formatNumber(selectedDateSummary.rows);
+  if (!resultCount || !resultCount.includes(selectedDateRows)) {
     throw new Error(`default view should be latest date only, got: ${resultCount}`);
   }
 
+  const uniqueResult = await page.evaluate(async (date) => {
+    const response = await fetch(`/api/trends?collected_date=${encodeURIComponent(date)}&unique=yes&limit=1`);
+    return response.json();
+  }, selectedDate);
+  const uniqueRows = formatNumber(uniqueResult.total);
   await page.selectOption("#queryMode", "unique");
-  await page.waitForFunction(() => {
+  await page.waitForFunction((expected) => {
     const resultCount = document.querySelector("#resultCount")?.textContent || "";
-    return resultCount.includes("3,555");
-  });
+    return resultCount.includes(expected);
+  }, uniqueRows);
 
   await page.selectOption("#queryMode", "");
-  await page.waitForFunction(() => {
+  await page.waitForFunction((expected) => {
     const resultCount = document.querySelector("#resultCount")?.textContent || "";
-    return resultCount.includes("4,982");
-  });
+    return resultCount.includes(expected);
+  }, selectedDateRows);
 
-  await page.fill("#search", "台風");
-  await page.waitForFunction(() => {
+  await page.fill("#search", searchTerm);
+  await page.waitForFunction((expected) => {
     const rows = document.querySelector("#rows")?.textContent || "";
-    return rows.includes("台風");
-  });
+    return rows.includes(expected);
+  }, searchTerm);
 
   const rowText = await page.locator("#rows tr").first().innerText();
-  if (!rowText.includes("台風")) {
+  if (!rowText.includes(searchTerm)) {
     throw new Error(`filtered row did not contain query: ${rowText}`);
   }
 
   await page.fill("#search", "");
-  await page.waitForFunction(() => {
+  await page.waitForFunction((expected) => {
     const resultCount = document.querySelector("#resultCount")?.textContent || "";
-    return resultCount.includes("4,982");
-  });
+    return resultCount.includes(expected);
+  }, selectedDateRows);
 
   const initialRows = await page.locator("#rows tr").count();
   await page.locator(".table-wrap").hover();
