@@ -224,8 +224,10 @@ async function jumpToPage() {
 function maybeLoadNextFromTableScroll() {
   const wrap = document.querySelector(".table-wrap");
   if (!wrap) return;
-  const nearBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
-  if (nearBottom) loadNextPage();
+  const maxScroll = wrap.scrollHeight - wrap.clientHeight;
+  if (maxScroll <= 0) return;
+  const scrollProgress = wrap.scrollTop / maxScroll;
+  if (scrollProgress >= 0.8) loadNextPage();
 }
 
 function bindEvents() {
