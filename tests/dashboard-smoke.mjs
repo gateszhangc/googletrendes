@@ -75,10 +75,15 @@ try {
   }
 
   await page.fill("#search", "");
+  await page.waitForTimeout(400);
   await page.waitForFunction((expected) => {
     const resultCount = document.querySelector("#resultCount")?.textContent || "";
     return resultCount.includes(expected);
   }, selectedDateRows);
+  await page.waitForFunction(() => {
+    return document.querySelector("#pageJump")?.value === "1" &&
+      document.querySelectorAll("#rows tr").length >= 80;
+  });
 
   const initialRows = await page.locator("#rows tr").count();
   await page.evaluate(() => {
