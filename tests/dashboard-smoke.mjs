@@ -100,11 +100,17 @@ try {
     throw new Error(`expected infinite scroll to append rows, got ${initialRows} -> ${rowsAfterAutoLoad}`);
   }
 
-  await page.fill("#pageJump", "12");
+  const targetPage = Math.min(12, Math.ceil(selectedDateSummary.rows / 80));
+  const expectedStart = ((targetPage - 1) * 80) + 1;
+  const expectedEnd = Math.min(targetPage * 80, selectedDateSummary.rows);
+  await page.fill("#pageJump", String(targetPage));
   await page.click("#jumpPage");
-  await page.waitForFunction(() => {
+  await page.waitForFunction(({ pageValue, rangeText }) => {
     const resultCount = document.querySelector("#resultCount")?.textContent || "";
-    return document.querySelector("#pageJump")?.value === "12" && resultCount.includes("881-960");
+    return document.querySelector("#pageJump")?.value === pageValue && resultCount.includes(rangeText);
+  }, {
+    pageValue: String(targetPage),
+    rangeText: `${formatNumber(expectedStart)}-${formatNumber(expectedEnd)}`,
   });
 } finally {
   await browser.close();
