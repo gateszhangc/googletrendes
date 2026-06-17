@@ -112,6 +112,46 @@ try {
     pageValue: String(targetPage),
     rangeText: `${formatNumber(expectedStart)}-${formatNumber(expectedEnd)}`,
   });
+
+  let releaseDelayedFirstPage;
+  const delayedFirstPage = new Promise((resolve) => {
+    releaseDelayedFirstPage = resolve;
+  });
+  let delayedOnce = false;
+  await page.route("**/api/trends?**", async (route) => {
+    const url = new URL(route.request().url());
+    if (
+      !delayedOnce &&
+      url.searchParams.get("unique") === "yes" &&
+      url.searchParams.get("offset") === "0"
+    ) {
+      delayedOnce = true;
+      await delayedFirstPage;
+    }
+    await route.continue();
+  });
+
+  await page.selectOption("#queryMode", "unique");
+  await page.waitForFunction(() => {
+    return document.querySelector("#status")?.textContent?.includes("读取中");
+  });
+
+  const raceTargetPage = Math.min(21, Math.ceil(uniqueResult.total / 80));
+  if (raceTargetPage < 2) {
+    throw new Error(`expected enough unique rows for jump race test, got ${uniqueResult.total}`);
+  }
+  const raceExpectedStart = ((raceTargetPage - 1) * 80) + 1;
+  const raceExpectedEnd = Math.min(raceTargetPage * 80, uniqueResult.total);
+  await page.fill("#pageJump", String(raceTargetPage));
+  await page.click("#jumpPage");
+  releaseDelayedFirstPage();
+  await page.waitForFunction(({ pageValue, rangeText }) => {
+    const resultCount = document.querySelector("#resultCount")?.textContent || "";
+    return document.querySelector("#pageJump")?.value === pageValue && resultCount.includes(rangeText);
+  }, {
+    pageValue: String(raceTargetPage),
+    rangeText: `${raceExpectedStart}-${raceExpectedEnd}`,
+  });
 } finally {
   await browser.close();
 }

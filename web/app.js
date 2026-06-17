@@ -5,6 +5,7 @@ const state = {
   latestCollectedDate: "",
   loadingRows: false,
   loadedUntil: 0,
+  rowsRequestId: 0,
 };
 
 const el = (id) => document.getElementById(id);
@@ -140,11 +141,15 @@ function renderRows(rows, append = false) {
 }
 
 async function loadRows({ append = false } = {}) {
-  if (state.loadingRows) return;
+  if (append && state.loadingRows) return;
+  const requestId = state.rowsRequestId + 1;
+  state.rowsRequestId = requestId;
   state.loadingRows = true;
   el("status").textContent = "读取中...";
   try {
-    const data = await getJson(`/api/trends?${params().toString()}`);
+    const requestUrl = `/api/trends?${params().toString()}`;
+    const data = await getJson(requestUrl);
+    if (requestId !== state.rowsRequestId) return;
     state.total = data.total;
     renderRows(data.rows, append);
     state.loadedUntil = append
@@ -165,7 +170,9 @@ async function loadRows({ append = false } = {}) {
     el("status").textContent = "已同步数据";
     renderBatchLabel();
   } finally {
-    state.loadingRows = false;
+    if (requestId === state.rowsRequestId) {
+      state.loadingRows = false;
+    }
   }
 }
 
