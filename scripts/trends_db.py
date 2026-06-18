@@ -42,6 +42,8 @@ create index if not exists idx_trend_geo on trend_queries(geo);
 create index if not exists idx_trend_category on trend_queries(category);
 create index if not exists idx_trend_change_value on trend_queries(change_value);
 create index if not exists idx_trend_query on trend_queries(query);
+create index if not exists idx_trend_source_file_row on trend_queries(source_file_id, source_row);
+create index if not exists idx_trend_query_id on trend_queries(query, id);
 """
 
 
@@ -83,6 +85,8 @@ create index if not exists idx_trend_geo on trend_queries(geo);
 create index if not exists idx_trend_category on trend_queries(category);
 create index if not exists idx_trend_change_value on trend_queries(change_value);
 create index if not exists idx_trend_query on trend_queries(query);
+create index if not exists idx_trend_source_file_row on trend_queries(source_file_id, source_row);
+create index if not exists idx_trend_query_id on trend_queries(query, id);
 """
 
 

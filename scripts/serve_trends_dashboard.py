@@ -236,43 +236,35 @@ class TrendsHandler(BaseHTTPRequestHandler):
                     with filtered as (
                       select
                         tq.id,
-                        tq.geo,
-                        tq.category,
-                        tq.date_range,
                         tq.query,
-                        tq.translation_original,
-                        tq.translation_ai,
-                        tq.change_label,
-                        tq.change_value,
-                        tq.change_is_breakout,
-                        sf.name as source_file,
-                        {self.collected_date_sql("sf")} as collected_date,
                         sf.path as source_path,
-                        tq.source_row,
-                        row_number() over (
-                          partition by tq.query
-                          order by sf.path asc, tq.source_row asc
-                        ) as row_rank
+                        tq.source_row
                       from trend_queries tq
                       join source_files sf on sf.id = tq.source_file_id
                       {clause}
+                    ),
+                    first_rows as (
+                      select min(id) as id
+                      from filtered
+                      group by query
                     )
                     select
-                      id,
-                      geo,
-                      category,
-                      date_range,
-                      query,
-                      translation_original,
-                      translation_ai,
-                      change_label,
-                      change_value,
-                      change_is_breakout,
-                      source_file,
-                      collected_date
-                    from filtered
-                    where row_rank = 1
-                    order by source_path asc, source_row asc
+                      tq.id,
+                      tq.geo,
+                      tq.category,
+                      tq.date_range,
+                      tq.query,
+                      tq.translation_original,
+                      tq.translation_ai,
+                      tq.change_label,
+                      tq.change_value,
+                      tq.change_is_breakout,
+                      sf.name as source_file,
+                      {self.collected_date_sql("sf")} as collected_date
+                    from first_rows fr
+                    join trend_queries tq on tq.id = fr.id
+                    join source_files sf on sf.id = tq.source_file_id
+                    order by sf.path asc, tq.source_row asc
                     limit {mark} offset {mark}
                     """,
                     [*values, limit, offset],
