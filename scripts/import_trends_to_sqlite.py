@@ -152,12 +152,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR))
     parser.add_argument("--db", default=str(DEFAULT_DB))
+    parser.add_argument("--date", default=None,
+                        help="date string for file glob (e.g. 2026-06-25); defaults to input-dir name")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
-    files = sorted(input_dir.glob("google_trends_rising_2026-06-04*.tsv"))
+    date_pattern = args.date or input_dir.name
+    files = sorted(input_dir.glob(f"google_trends_rising_{date_pattern}*.tsv"))
     if not files:
-        raise SystemExit(f"no google trends TSV files found in {input_dir}")
+        raise SystemExit(f"no google trends TSV files matching {date_pattern} found in {input_dir}")
 
     conn = connect(Path(args.db))
     total = 0
