@@ -199,22 +199,33 @@ kubectl patch app -n argocd googletrendes-production \
   warn "kubectl patch failed — ArgoCD will sync on next poll cycle (~3min)"
 
 # ── 13. Wait for new pod ─────────────────────────────────────────────────────
-log "Waiting for new pod rollout..."
+log "Waiting for ArgoCD sync + new pod rollout..."
+# Capture old pod hash before rollout starts
 OLD_POD=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-for i in $(seq 1 30); do
+log "Old pod: $OLD_POD"
+
+NEW_POD=""
+for i in $(seq 1 40); do
   sleep 5
+  # Get all pods, find one that isn't the old pod
   PODS=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
-  NEW_POD=$(echo "$PODS" | tr ' ' '\n' | grep -v "^$OLD_POD$" | head -1)
+  NEW_POD=$(echo "$PODS" | tr ' ' '\n' | grep -v "^${OLD_POD}$" | head -1)
   if [[ -n "$NEW_POD" ]]; then
     READY=$(kubectl get pod "$NEW_POD" -n googletrendes-production -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)
     if [[ "$READY" == "true" ]]; then
       ok "New pod ready: $NEW_POD"
       break
     fi
+    printf "~-~" # pod exists but not ready yet
+  else
+    printf "."  # waiting for ArgoCD to sync + create new pod
   fi
-  printf "."
 done
 echo ""
+
+if [[ -z "$NEW_POD" ]]; then
+  warn "Timed out waiting for new pod — checking production anyway"
+fi
 
 # ── 14. Verify production ────────────────────────────────────────────────────
 log "Verifying production..."
