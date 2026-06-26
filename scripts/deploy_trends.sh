@@ -120,7 +120,7 @@ if ! $SKIP_TEST; then
   lsof -ti:$SMOKE_PORT | xargs kill -9 2>/dev/null || true
   python3 "$SCRIPT_DIR/serve_trends_dashboard.py" --web web --host 127.0.0.1 --port $SMOKE_PORT &
   SERVER_PID=$!
-  trap "kill $SERVER_PID 2>/dev/null" EXIT
+  trap "kill $SERVER_PID 2>/dev/null || true" EXIT
 
   sleep 2
   if ! curl -sf "http://127.0.0.1:$SMOKE_PORT/healthz" >/dev/null 2>&1; then
