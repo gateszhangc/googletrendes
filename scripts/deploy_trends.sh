@@ -159,7 +159,7 @@ ok "Image built"
 log "Pushing $IMAGE..."
 PUSH_OUTPUT=$(docker push "$IMAGE" 2>&1)
 echo "$PUSH_OUTPUT" | tail -2
-DIGEST=$(echo "$PUSH_OUTPUT" | grep -oP 'sha256:\K[a-f0-9]+' | head -1)
+DIGEST=$(echo "$PUSH_OUTPUT" | grep -oE 'sha256:[a-f0-9]+' | head -1 | sed 's/sha256://')
 if [[ -z "$DIGEST" ]]; then
   fail "Failed to extract digest from push output"
 fi
