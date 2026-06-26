@@ -201,17 +201,17 @@ kubectl patch app -n argocd googletrendes-production \
 # ── 13. Wait for new pod ─────────────────────────────────────────────────────
 log "Waiting for ArgoCD sync + new pod rollout..."
 # Capture old pod hash before rollout starts
-OLD_POD=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+OLD_POD=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 log "Old pod: $OLD_POD"
 
 NEW_POD=""
 for i in $(seq 1 40); do
   sleep 5
-  # Get all pods, find one that isn't the old pod
-  PODS=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
-  NEW_POD=$(echo "$PODS" | tr ' ' '\n' | grep -v "^${OLD_POD}$" | head -1)
+  # Get all pods, find one that isn't the old pod (grep -v returns 1 when no match, so || true)
+  PODS=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+  NEW_POD=$(echo "$PODS" | tr ' ' '\n' | grep -v "^${OLD_POD}$" | head -1 || true)
   if [[ -n "$NEW_POD" ]]; then
-    READY=$(kubectl get pod "$NEW_POD" -n googletrendes-production -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)
+    READY=$(kubectl get pod "$NEW_POD" -n googletrendes-production -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
     if [[ "$READY" == "true" ]]; then
       ok "New pod ready: $NEW_POD"
       break
