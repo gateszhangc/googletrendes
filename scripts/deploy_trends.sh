@@ -1,253 +1,307 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─────────────────────────────────────────────────────────────────────────────
-# deploy_trends.sh — One-shot import + deploy for Google Trends data
+# One-shot Google Trends day import + production release.
 #
 # Usage:
-#   scripts/deploy_trends.sh                    # import today's new files + deploy
-#   scripts/deploy_trends.sh 2026-06-25         # specify date
-#   scripts/deploy_trends.sh --import-only      # import only, no deploy
-#   scripts/deploy_trends.sh --skip-test        # deploy without smoke test
-# ─────────────────────────────────────────────────────────────────────────────
+#   scripts/deploy_trends.sh
+#   scripts/deploy_trends.sh 2026-07-01
+#   scripts/deploy_trends.sh --import-only
+#   scripts/deploy_trends.sh --skip-test
+#   scripts/deploy_trends.sh --force
 #
-# Bottlenecks eliminated:
-#   1. Auto-detects new TSV files by date
-#   2. Dynamic glob (no hardcoded date in import script)
-#   3. Auto WAL checkpoint before git commit
-#   4. Auto port cleanup for smoke test
-#   5. Auto version bump from latest git tag
-#   6. Parallel-ish: git push while docker build
-#   7. Auto k8s-fleet manifest update with sed
-#   8. Auto ArgoCD refresh via kubectl patch
-#   9. Auto rollout wait + production verification
+# This project intentionally deploys directly to production through k8s/ArgoCD.
+# Dokploy and staging are not used for googletrendes.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-K8S_FLEET_DIR="$PROJECT_DIR/../k8s-fleet"
+K8S_FLEET_DIR="${K8S_FLEET_DIR:-$PROJECT_DIR/../k8s-fleet}"
 DB_PATH="$PROJECT_DIR/data/google_trends.sqlite"
-SMOKE_PORT=9876
+PROCESSOR="$HOME/.codex/skills/google-trends-folder-processor/scripts/process_google_trends_day.py"
+SMOKE_PORT="${SMOKE_PORT:-9876}"
 GHCR_REPO="ghcr.io/gateszhangc/googletrendes"
 K8S_MANIFEST="tenants/googletrendes-production/20-deployment.yaml"
 PROD_URL="https://googletrendes.codex55.lol"
+ARGO_APP="googletrendes-production"
 
-cd "$PROJECT_DIR"
-
-# ── Colors ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-log()  { echo -e "${CYAN}[$(date +%H:%M:%S)]${NC} $*"; }
-ok()   { echo -e "${GREEN}[$(date +%H:%M:%S)] ✅${NC} $*"; }
-warn() { echo -e "${YELLOW}[$(date +%H:%M:%S)] ⚠️${NC} $*"; }
-fail() { echo -e "${RED}[$(date +%H:%M:%S)] ❌${NC} $*"; exit 1; }
-
-# ── Parse args ───────────────────────────────────────────────────────────────
 IMPORT_ONLY=false
 SKIP_TEST=false
+FORCE=false
 DATE_ARG=""
+SERVER_PID=""
+
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+fail() { printf '[%s] ERROR: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
+
+cleanup() {
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+usage() {
+  cat <<'EOF'
+One-shot Google Trends day import + production release.
+
+Usage:
+  scripts/deploy_trends.sh
+  scripts/deploy_trends.sh 2026-07-01
+  scripts/deploy_trends.sh --import-only
+  scripts/deploy_trends.sh --skip-test
+  scripts/deploy_trends.sh --force
+
+This project deploys directly to production through k8s/ArgoCD.
+Dokploy and staging are not used for googletrendes.
+EOF
+}
 
 for arg in "$@"; do
   case "$arg" in
-    --import-only) IMPORT_ONLY=true ;;
-    --skip-test)   SKIP_TEST=true ;;
-    *)             DATE_ARG="$arg" ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --import-only)
+      IMPORT_ONLY=true
+      ;;
+    --skip-test)
+      SKIP_TEST=true
+      ;;
+    --force)
+      FORCE=true
+      ;;
+    -*)
+      fail "Unknown argument: $arg"
+      ;;
+    *)
+      DATE_ARG="$arg"
+      ;;
   esac
 done
 
-# ── Determine date ───────────────────────────────────────────────────────────
 if [[ -n "$DATE_ARG" ]]; then
   DATE="$DATE_ARG"
 else
-  DATE=$(date +%Y-%m-%d)
+  DATE="$(date +%Y-%m-%d)"
 fi
 DATA_DIR="$PROJECT_DIR/$DATE"
+EXPECTED_HEADER=$'geo\tcat\tdate\tquery\ttranslation\tchange'
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+}
+
+require git
+require python3
+require sqlite3
+require npm
+require docker
+require kubectl
+require curl
+require shasum
+
+[[ -f "$PROCESSOR" ]] || fail "Processor not found: $PROCESSOR"
+[[ -d "$DATA_DIR" ]] || fail "Date directory not found: $DATA_DIR"
+
+cd "$PROJECT_DIR"
+
+APP_STATUS="$(git status --short)"
+[[ -z "$APP_STATUS" ]] || fail "App repo has uncommitted changes before start:\n$APP_STATUS"
+
 log "Date: $DATE"
+log "Scanning official TSV files"
+FILES=()
+while IFS= read -r file; do
+  FILES+=("$file")
+done < <(find "$DATA_DIR" -maxdepth 1 -type f -name "google_trends_rising_${DATE}*.tsv" -print | sort)
 
-# ── 1. Find & validate TSV files ─────────────────────────────────────────────
-log "Scanning $DATA_DIR for TSV files..."
-FILES=( $(find "$DATA_DIR" -name "google_trends_rising_${DATE}*.tsv" | sort) )
-if [[ ${#FILES[@]} -eq 0 ]]; then
-  fail "No TSV files found for $DATE in $DATA_DIR"
-fi
-log "Found ${#FILES[@]} file(s):"
-for f in "${FILES[@]}"; do echo "  $(basename "$f")"; done
-
-# Validate headers
-for f in "${FILES[@]}"; do
-  header=$(sed -n '1p' "$f")
-  if [[ "$header" != "geo	cat	date	query	translation	change" ]]; then
-    fail "Bad header in $(basename "$f"): $header"
-  fi
+[[ ${#FILES[@]} -gt 0 ]] || fail "No official TSV files found in $DATA_DIR"
+for file in "${FILES[@]}"; do
+  header="$(sed -n '1p' "$file")"
+  [[ "$header" == "$EXPECTED_HEADER" ]] || fail "Bad TSV header in $file: $header"
 done
-ok "Headers validated"
+log "TSV headers ok: ${#FILES[@]} file(s)"
 
-# ── 2. Import into SQLite ────────────────────────────────────────────────────
-log "Importing into SQLite..."
-python3 "$SCRIPT_DIR/import_trends_to_sqlite.py" --input-dir "$DATA_DIR" --date "$DATE" --db "$DB_PATH"
-
-# ── 3. WAL checkpoint (so git sees the changes) ──────────────────────────────
-log "WAL checkpoint..."
-python3 -c "
-import sqlite3
-conn = sqlite3.connect('$DB_PATH')
-conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-conn.close()
-print('checkpoint done')
-"
-
-# ── 4. Check git diff ────────────────────────────────────────────────────────
-if ! git diff --quiet "$DB_PATH" 2>/dev/null; then
-  ok "Database has changes to commit"
-else
-  warn "No database changes detected — files may have been already imported"
-  if $IMPORT_ONLY; then exit 0; fi
+if ! $FORCE; then
+  NEEDS_PROCESS=false
+  for file in "${FILES[@]}"; do
+    rel="${file#$PROJECT_DIR/}"
+    rel_sql="${rel//\'/\'\'}"
+    actual_sha="$(shasum -a 256 "$file" | awk '{print $1}')"
+    stored_sha="$(sqlite3 "$DB_PATH" "select coalesce((select sha256 from source_files where path='$rel_sql'), '');")"
+    if [[ "$actual_sha" != "$stored_sha" ]]; then
+      log "Changed or new TSV: $rel"
+      NEEDS_PROCESS=true
+    fi
+  done
+  EXISTING_MISSING="$(sqlite3 "$DB_PATH" "select count(*) from trend_queries tq join source_files sf on tq.source_file_id=sf.id where sf.path like '$DATE/%' and coalesce(tq.translation_ai,'')='';")"
+  if [[ "$EXISTING_MISSING" != "0" ]]; then
+    log "Existing missing translations for $DATE: $EXISTING_MISSING"
+    NEEDS_PROCESS=true
+  fi
+  if ! $NEEDS_PROCESS; then
+    log "No changed TSV files and no missing translations for $DATE; nothing to release"
+    exit 0
+  fi
 fi
 
-# ── 5. Git commit + push ─────────────────────────────────────────────────────
-log "Git commit + push..."
-git add "$DB_PATH"
-git commit -m "Import google trends $DATE data"
-git push origin main
-ok "Pushed to origin/main"
+log "Importing and translating with folder processor"
+python3 "$PROCESSOR" --project "$PROJECT_DIR" --date "$DATE" --db "$DB_PATH" --translate
 
-if $IMPORT_ONLY; then
-  ok "Import-only mode complete"
+log "Validating SQLite date batch"
+DAY_SUMMARY="$(sqlite3 "$DB_PATH" "select count(*) || '|' || count(distinct query) || '|' || count(distinct geo) || '|' || count(distinct category) || '|' || coalesce(sum(change_is_breakout),0) || '|' || sum(case when coalesce(translation_ai,'')<>'' then 1 else 0 end) from trend_queries tq join source_files sf on tq.source_file_id=sf.id where sf.path like '$DATE/%';")"
+IFS='|' read -r DAY_ROWS DAY_UNIQUE DAY_GEOS DAY_CATS DAY_BREAKOUTS DAY_TRANSLATED <<<"$DAY_SUMMARY"
+MISSING_TRANSLATIONS="$(sqlite3 "$DB_PATH" "select count(*) from trend_queries tq join source_files sf on tq.source_file_id=sf.id where sf.path like '$DATE/%' and coalesce(tq.translation_ai,'')='';")"
+if [[ "$MISSING_TRANSLATIONS" != "0" ]]; then
+  sqlite3 -header -column "$DB_PATH" "select tq.geo, tq.category, quote(tq.query) query, quote(tq.translation_original) translation_original, sf.path from trend_queries tq join source_files sf on tq.source_file_id=sf.id where sf.path like '$DATE/%' and coalesce(tq.translation_ai,'')='' limit 20;"
+  fail "Missing AI translations for $DATE: $MISSING_TRANSLATIONS"
+fi
+log "Date summary: rows=$DAY_ROWS unique=$DAY_UNIQUE geos=$DAY_GEOS categories=$DAY_CATS breakouts=$DAY_BREAKOUTS translated=$DAY_TRANSLATED"
+
+log "Checkpointing SQLite WAL"
+sqlite3 "$DB_PATH" "pragma wal_checkpoint(truncate);" >/dev/null
+
+if git diff --quiet -- "$DB_PATH"; then
+  log "No SQLite changes detected; nothing to release"
   exit 0
 fi
 
-# ── 6. Smoke test (with auto port cleanup) ───────────────────────────────────
 if ! $SKIP_TEST; then
-  log "Starting dashboard for smoke test..."
-  lsof -ti:$SMOKE_PORT | xargs kill -9 2>/dev/null || true
-  python3 "$SCRIPT_DIR/serve_trends_dashboard.py" --web web --host 127.0.0.1 --port $SMOKE_PORT &
-  SERVER_PID=$!
-  trap "kill $SERVER_PID 2>/dev/null || true" EXIT
-
-  sleep 2
-  if ! curl -sf "http://127.0.0.1:$SMOKE_PORT/healthz" >/dev/null 2>&1; then
-    fail "Dashboard server failed to start"
+  log "Running local dashboard smoke test"
+  PIDS="$(lsof -ti tcp:"$SMOKE_PORT" 2>/dev/null || true)"
+  if [[ -n "$PIDS" ]]; then
+    kill $PIDS >/dev/null 2>&1 || true
   fi
-
-  log "Running smoke test..."
-  npm run test:dashboard || fail "Smoke test failed"
-  kill $SERVER_PID 2>/dev/null || true
-  ok "Smoke test passed"
+  python3 "$SCRIPT_DIR/serve_trends_dashboard.py" --web "$PROJECT_DIR/web" --host 127.0.0.1 --port "$SMOKE_PORT" &
+  SERVER_PID="$!"
+  sleep 2
+  curl -fsS "http://127.0.0.1:$SMOKE_PORT/healthz" >/dev/null
+  DASHBOARD_URL="http://127.0.0.1:$SMOKE_PORT" npm run test:dashboard
+  kill "$SERVER_PID" >/dev/null 2>&1 || true
+  SERVER_PID=""
 fi
 
-# ── 7. Auto version bump ─────────────────────────────────────────────────────
-LATEST_TAG=$(git tag --sort=-v:refname | head -1)
-log "Latest tag: $LATEST_TAG"
-# Parse major.minor.patch and bump patch
-BASE=$(echo "$LATEST_TAG" | sed 's/v//')
-MAJOR=$(echo "$BASE" | cut -d. -f1)
-MINOR=$(echo "$BASE" | cut -d. -f2)
-PATCH=$(echo "$BASE" | cut -d. -f3)
-NEW_PATCH=$((PATCH + 1))
-NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
-log "New tag: $NEW_TAG"
+if $IMPORT_ONLY; then
+  log "Import-only mode complete; SQLite changes are left in the working tree"
+  exit 0
+fi
 
-# ── 8. Tag + push ────────────────────────────────────────────────────────────
-git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
-git push origin "$NEW_TAG"
-ok "Tagged $NEW_TAG"
-
-# ── 9. Docker build + push ───────────────────────────────────────────────────
+LATEST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)"
+[[ -n "$LATEST_TAG" ]] || fail "No existing release tag found"
+BASE="${LATEST_TAG#v}"
+IFS='.' read -r MAJOR MINOR PATCH <<<"$BASE"
+NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
 IMAGE="$GHCR_REPO:$NEW_TAG"
-log "Building Docker image $IMAGE..."
-docker build -t "$IMAGE" "$PROJECT_DIR" 2>&1 | tail -3
-ok "Image built"
+COMMIT_MSG="Import additional google trends $DATE data"
 
-log "Pushing $IMAGE..."
-PUSH_OUTPUT=$(docker push "$IMAGE" 2>&1)
-echo "$PUSH_OUTPUT" | tail -2
-DIGEST=$(echo "$PUSH_OUTPUT" | grep -oE 'sha256:[a-f0-9]+' | head -1 | sed 's/sha256://')
-if [[ -z "$DIGEST" ]]; then
-  fail "Failed to extract digest from push output"
-fi
-FULL_DIGEST="sha256:$DIGEST"
-ok "Pushed: $NEW_TAG@$FULL_DIGEST"
-
-# ── 10. Update k8s-fleet manifest ────────────────────────────────────────────
-MANIFEST_PATH="$K8S_FLEET_DIR/$K8S_MANIFEST"
-if [[ ! -f "$MANIFEST_PATH" ]]; then
-  fail "k8s-fleet manifest not found at $MANIFEST_PATH"
-fi
-
-log "Updating k8s-fleet manifest..."
-# Record previous image for rollback
-PREV_IMAGE=$(grep 'image:' "$MANIFEST_PATH" | head -1 | awk '{print $2}' | xargs)
-log "Previous image: $PREV_IMAGE"
-
-sed -i.bak "s|image: ghcr.io/gateszhangc/googletrendes:[^ ]*|image: $IMAGE@$FULL_DIGEST|" "$MANIFEST_PATH"
-rm -f "$MANIFEST_PATH.bak"
-
-# Verify
-grep 'image:' "$MANIFEST_PATH"
-
-# ── 11. Commit + push k8s-fleet ──────────────────────────────────────────────
-log "Committing k8s-fleet..."
-cd "$K8S_FLEET_DIR"
-git add "$K8S_MANIFEST"
-git commit -m "deploy(googletrendes-production): bump to $NEW_TAG"
+log "Committing app data as $NEW_TAG"
+git add "$DB_PATH"
+git commit -m "$COMMIT_MSG"
+git tag "$NEW_TAG"
 git push origin main
-ok "k8s-fleet pushed"
+git push origin "$NEW_TAG"
+
+log "Building SQLite-only image from $LATEST_TAG"
+if ! printf '%s\n' "FROM $GHCR_REPO:$LATEST_TAG" "COPY data/google_trends.sqlite /app/data/google_trends.sqlite" |
+  docker build -f - -t "$IMAGE" "$PROJECT_DIR"; then
+  log "SQLite-only build failed; falling back to full Dockerfile build"
+  docker build -t "$IMAGE" "$PROJECT_DIR"
+fi
+
+log "Pushing $IMAGE"
+PUSH_OUTPUT="$(docker push "$IMAGE" 2>&1)"
+printf '%s\n' "$PUSH_OUTPUT"
+FULL_DIGEST="$(printf '%s\n' "$PUSH_OUTPUT" | awk '/digest: sha256/ {print $3; exit}')"
+[[ "$FULL_DIGEST" == sha256:* ]] || fail "Failed to extract image digest"
+IMAGE_WITH_DIGEST="$IMAGE@$FULL_DIGEST"
+log "Image pushed: $IMAGE_WITH_DIGEST"
+
+log "Updating GitOps production manifest"
+cd "$K8S_FLEET_DIR"
+K8S_STATUS="$(git status --short)"
+[[ -z "$K8S_STATUS" ]] || fail "k8s-fleet has uncommitted changes before start:\n$K8S_STATUS"
+git pull --ff-only
+
+MANIFEST_PATH="$K8S_FLEET_DIR/$K8S_MANIFEST"
+[[ -f "$MANIFEST_PATH" ]] || fail "Manifest not found: $MANIFEST_PATH"
+PREV_IMAGE="$(grep 'image:' "$MANIFEST_PATH" | head -1 | awk '{print $2}')"
+python3 - "$MANIFEST_PATH" "$IMAGE_WITH_DIGEST" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+image = sys.argv[2]
+text = path.read_text()
+new_text, count = re.subn(
+    r"image: ghcr\.io/gateszhangc/googletrendes:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[a-f0-9]+",
+    f"image: {image}",
+    text,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("expected exactly one googletrendes image reference")
+path.write_text(new_text)
+PY
+
+kubectl kustomize tenants/googletrendes-production >/tmp/googletrendes-production-render.yaml
+kubectl apply --dry-run=client -f /tmp/googletrendes-production-render.yaml >/dev/null
+
+git add "$K8S_MANIFEST"
+git commit -m "Release googletrendes production $NEW_TAG"
+git push origin main
+TARGET_REV="$(git rev-parse HEAD)"
+
+log "Refreshing ArgoCD $ARGO_APP"
+kubectl --request-timeout=120s -n argocd annotate application "$ARGO_APP" argocd.argoproj.io/refresh=hard --overwrite >/dev/null
+for attempt in $(seq 1 60); do
+  REV="$(kubectl --request-timeout=120s -n argocd get application "$ARGO_APP" -o jsonpath='{.status.sync.revision}' 2>/dev/null || true)"
+  SYNC="$(kubectl --request-timeout=120s -n argocd get application "$ARGO_APP" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+  HEALTH="$(kubectl --request-timeout=120s -n argocd get application "$ARGO_APP" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+  log "ArgoCD attempt=$attempt rev=$REV sync=$SYNC health=$HEALTH"
+  if [[ "$REV" == "$TARGET_REV" && "$SYNC" == "Synced" && "$HEALTH" == "Healthy" ]]; then
+    break
+  fi
+  if [[ "$attempt" == "60" ]]; then
+    fail "ArgoCD did not reach Synced/Healthy for $TARGET_REV"
+  fi
+  sleep 5
+done
+
 cd "$PROJECT_DIR"
 
-# ── 12. Force ArgoCD refresh ─────────────────────────────────────────────────
-log "Forcing ArgoCD refresh..."
-kubectl patch app -n argocd googletrendes-production \
-  --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"true"}}}' 2>/dev/null || \
-  warn "kubectl patch failed — ArgoCD will sync on next poll cycle (~3min)"
+log "Verifying production"
+HEALTH_JSON="$(curl -fsS "$PROD_URL/healthz")"
+SUMMARY_JSON="$(curl -fsS "$PROD_URL/api/summary?collected_date=$DATE")"
+ONLINE_ROWS="$(printf '%s' "$HEALTH_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rows"])')"
+ONLINE_DAY_ROWS="$(printf '%s' "$SUMMARY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rows"])')"
+ONLINE_DAY_FILES="$(printf '%s' "$SUMMARY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["files"])')"
+ONLINE_TRANSLATED_RATE="$(printf '%s' "$SUMMARY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["translated_rate"])')"
+[[ "$ONLINE_DAY_ROWS" == "$DAY_ROWS" ]] || fail "Production day rows mismatch: local=$DAY_ROWS online=$ONLINE_DAY_ROWS"
 
-# ── 13. Wait for new pod ─────────────────────────────────────────────────────
-log "Waiting for ArgoCD sync + new pod rollout..."
-# Capture old pod hash before rollout starts
-OLD_POD=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-log "Old pod: $OLD_POD"
+kubectl --request-timeout=120s -n googletrendes-production get pods -o wide
 
-NEW_POD=""
-for i in $(seq 1 40); do
-  sleep 5
-  # Get all pods, find one that isn't the old pod (grep -v returns 1 when no match, so || true)
-  PODS=$(kubectl get pods -n googletrendes-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
-  NEW_POD=$(echo "$PODS" | tr ' ' '\n' | grep -v "^${OLD_POD}$" | head -1 || true)
-  if [[ -n "$NEW_POD" ]]; then
-    READY=$(kubectl get pod "$NEW_POD" -n googletrendes-production -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
-    if [[ "$READY" == "true" ]]; then
-      ok "New pod ready: $NEW_POD"
-      break
-    fi
-    printf "~-~" # pod exists but not ready yet
-  else
-    printf "."  # waiting for ArgoCD to sync + create new pod
-  fi
-done
-echo ""
-
-if [[ -z "$NEW_POD" ]]; then
-  warn "Timed out waiting for new pod — checking production anyway"
+if ! $SKIP_TEST; then
+  DASHBOARD_URL="$PROD_URL" npm run test:dashboard
 fi
 
-# ── 14. Verify production ────────────────────────────────────────────────────
-log "Verifying production..."
-sleep 3
+FINAL_APP_STATUS="$(git status --short)"
+[[ -z "$FINAL_APP_STATUS" ]] || fail "App repo not clean after release:\n$FINAL_APP_STATUS"
+cd "$K8S_FLEET_DIR"
+FINAL_K8S_STATUS="$(git status --short)"
+[[ -z "$FINAL_K8S_STATUS" ]] || fail "k8s-fleet repo not clean after release:\n$FINAL_K8S_STATUS"
 
-HEALTH=$(curl -sf "$PROD_URL/healthz" 2>/dev/null || echo "FAILED")
-if [[ "$HEALTH" == "FAILED" ]]; then
-  fail "Production healthz check failed"
-fi
-ROWS=$(echo "$HEALTH" | python3 -c "import sys,json;print(json.load(sys.stdin)['rows'])" 2>/dev/null)
-ok "Production healthz: $ROWS rows"
+cat <<EOF
 
-SUMMARY=$(curl -sf "$PROD_URL/api/summary?collected_date=$DATE" 2>/dev/null || echo "FAILED")
-if [[ "$SUMMARY" != "FAILED" ]]; then
-  SROWS=$(echo "$SUMMARY" | python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"{d['rows']} rows, {d['files']} files, {d['breakouts']} breakouts\")" 2>/dev/null)
-  ok "Production $DATE data: $SROWS"
-fi
-
-echo ""
-ok "═══════════════════════════════════════════════════════════════"
-ok " $NEW_TAG deployed successfully!"
-ok " Image: $IMAGE@$FULL_DIGEST"
-ok " Rows:  $ROWS"
-ok " Rollback: set image to $PREV_IMAGE in k8s-fleet"
-ok "═══════════════════════════════════════════════════════════════"
+Release complete.
+Date: $DATE
+App tag: $NEW_TAG
+App image: $IMAGE_WITH_DIGEST
+Previous image: $PREV_IMAGE
+GitOps revision: $TARGET_REV
+Production rows: $ONLINE_ROWS
+$DATE rows: $ONLINE_DAY_ROWS
+$DATE files: $ONLINE_DAY_FILES
+$DATE translated_rate: $ONLINE_TRANSLATED_RATE
+EOF

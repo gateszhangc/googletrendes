@@ -17,6 +17,34 @@
 
 ## 发布流程
 
+推荐使用一键脚本执行当天数据导入和生产发布：
+
+```bash
+scripts/deploy_trends.sh
+```
+
+指定日期：
+
+```bash
+scripts/deploy_trends.sh 2026-07-01
+```
+
+脚本会执行：TSV 表头校验、SQLite 导入、AI 翻译、缺失翻译校验、本地 dashboard smoke、应用提交/tag/push、SQLite-only GHCR 镜像构建、production manifest dry-run、GitOps 提交、ArgoCD 同步、线上 health/summary/Pod/dashboard smoke 验证。
+
+脚本会先比较 TSV 文件的 `sha256` 和数据库中的 `source_files.sha256`。如果没有新增或变化的文件，并且没有缺失 AI 翻译，会直接退出，不重复导入和发布。需要强制重跑时使用：
+
+```bash
+scripts/deploy_trends.sh --force
+```
+
+只导入和本地验证、不发布：
+
+```bash
+scripts/deploy_trends.sh --import-only
+```
+
+手动发布流程如下，主要用于脚本失败后的排障或回滚：
+
 1. 在本仓库确认 `main` 是待发布提交，并确保工作区干净。
 2. 运行本地验证：
    - `npm test`
