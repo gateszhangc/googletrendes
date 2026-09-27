@@ -163,6 +163,16 @@ try {
   assert(duplicate.body.inserted === 0, "expected deduped upload to insert nothing");
   assert(stub.state.calls === 1, `expected a single translation call, got ${stub.state.calls}`);
 
+  const otherTerm = await postIngest(baseUrl, {
+    ...batch,
+    batch: { ...batch.batch, term: "north" },
+  });
+  assert(otherTerm.body.deduped === false, "expected a different seed term to create a new file");
+  assert(
+    otherTerm.body.source_file === "google_trends_top_2026-09-27_north.tsv",
+    `unexpected second source file: ${otherTerm.body.source_file}`
+  );
+
   const rising = await postIngest(baseUrl, {
     ...batch,
     batch: { ...batch.batch, type: "rising", term: "" },
@@ -176,7 +186,7 @@ try {
   assert(rising.body.translated === 0, "expected cached translations to be reused");
 
   const topRows = await (await fetch(`${baseUrl}/api/trends?type=top&limit=10`)).json();
-  assert(topRows.total === 3, `expected 3 top rows, got ${topRows.total}`);
+  assert(topRows.total === 6, `expected 6 top rows, got ${topRows.total}`);
   assert(
     topRows.rows.every((row) => row.translation_ai.startsWith("译-")),
     "expected AI translations on ingested rows"
@@ -210,7 +220,7 @@ try {
   );
 
   const summary = await (await fetch(`${baseUrl}/api/summary`)).json();
-  assert(summary.rows === 5, `expected 5 rows in summary, got ${summary.rows}`);
+  assert(summary.rows === 8, `expected 8 rows in summary, got ${summary.rows}`);
 
   console.log("ingest api tests passed");
 } catch (error) {

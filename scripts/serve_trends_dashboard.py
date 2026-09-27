@@ -216,7 +216,10 @@ class TrendsHandler(BaseHTTPRequestHandler):
             raise IngestError("rows must contain at least one query")
 
         tsv = self.build_tsv(geo, category, date_range, cleaned)
-        digest = hashlib.sha256(tsv.encode("utf-8")).hexdigest()
+        # The seed term is not part of the TSV columns, but two terms must not collapse
+        # into one upload, so include it in the content identity.
+        digest_source = tsv if not term else f"{tsv}\n#term={term}\n"
+        digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
         mark = placeholder(self.database_url)
 
         with self.db() as conn:
