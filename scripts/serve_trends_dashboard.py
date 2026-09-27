@@ -580,10 +580,17 @@ def main():
     TrendsHandler.web_root = Path(args.web)
     TrendsHandler.ingest_token = os.environ.get("INGEST_TOKEN", "").strip()
 
-    try:
-        prepare_database(TrendsHandler.database_url, TrendsHandler.db_path, args.seed_sqlite)
-    except Exception as error:
-        print(f"warning: database preparation failed: {type(error).__name__}: {error}")
+    attempts = 20 if TrendsHandler.database_url else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            prepare_database(TrendsHandler.database_url, TrendsHandler.db_path, args.seed_sqlite)
+            break
+        except Exception as error:
+            if attempt >= attempts:
+                print(f"warning: database preparation failed: {type(error).__name__}: {error}")
+                break
+            print(f"database not ready (attempt {attempt}/{attempts}): {error}")
+            time.sleep(3)
 
     server = ThreadingHTTPServer((args.host, args.port), TrendsHandler)
     print(f"serving http://{args.host}:{args.port}")
