@@ -564,7 +564,7 @@ def prepare_database(database_url, db_path, seed_path):
             return
         from seed_postgres_from_sqlite import seed_from_sqlite
 
-        counts = seed_from_sqlite(conn, seed_path)
+        counts = seed_from_sqlite(conn, seed_path, database_url)
         print(f"seeded postgres from {seed_path}: {counts}")
 
 
