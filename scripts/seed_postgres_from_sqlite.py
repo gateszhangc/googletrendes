@@ -27,14 +27,18 @@ def insert_source_files(conn, rows):
     for row in rows:
         conn.execute(
             """
-            insert into source_files(id, path, name, sha256, mtime, imported_at)
-            values (%s, %s, %s, %s, %s, %s)
+            insert into source_files(
+              id, path, name, sha256, mtime, imported_at, collected_date, query_type
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s)
             on conflict(id) do update set
               path=excluded.path,
               name=excluded.name,
               sha256=excluded.sha256,
               mtime=excluded.mtime,
-              imported_at=excluded.imported_at
+              imported_at=excluded.imported_at,
+              collected_date=excluded.collected_date,
+              query_type=excluded.query_type
             """,
             (
                 row["id"],
@@ -43,6 +47,8 @@ def insert_source_files(conn, rows):
                 row["sha256"],
                 row["mtime"],
                 row["imported_at"],
+                row.get("collected_date") or "",
+                row.get("query_type") or "",
             ),
         )
 
@@ -119,6 +125,29 @@ def reset_sequences(conn):
         )
 
 
+def seed_from_sqlite(conn, sqlite_path):
+    """Copy every row of the SQLite database into an (empty) Postgres database."""
+    sqlite_path = Path(sqlite_path)
+    if not sqlite_path.exists():
+        raise SystemExit(f"sqlite source not found: {sqlite_path}")
+
+    with sqlite3.connect(sqlite_path) as source:
+        source_files = sqlite_rows(source, "source_files")
+        trend_queries = sqlite_rows(source, "trend_queries")
+        translation_cache = sqlite_rows(source, "translation_cache")
+
+    clear_postgres(conn)
+    insert_source_files(conn, source_files)
+    insert_translation_cache(conn, translation_cache)
+    insert_trend_queries(conn, trend_queries)
+    reset_sequences(conn)
+    return {
+        "source_files": len(source_files),
+        "trend_queries": len(trend_queries),
+        "translation_cache": len(translation_cache),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sqlite", default=str(DEFAULT_SQLITE))
@@ -129,27 +158,14 @@ def main():
     if not database_url:
         raise SystemExit("DATABASE_URL or --database-url is required")
 
-    sqlite_path = Path(args.sqlite)
-    if not sqlite_path.exists():
-        raise SystemExit(f"sqlite source not found: {sqlite_path}")
-
-    with sqlite3.connect(sqlite_path) as source:
-        source_files = sqlite_rows(source, "source_files")
-        trend_queries = sqlite_rows(source, "trend_queries")
-        translation_cache = sqlite_rows(source, "translation_cache")
-
     with connect(database_url=database_url) as target:
         ensure_schema(target, database_url)
-        clear_postgres(target)
-        insert_source_files(target, source_files)
-        insert_translation_cache(target, translation_cache)
-        insert_trend_queries(target, trend_queries)
-        reset_sequences(target)
+        counts = seed_from_sqlite(target, args.sqlite)
 
     print(
-        f"seeded source_files={len(source_files)} "
-        f"trend_queries={len(trend_queries)} "
-        f"translation_cache={len(translation_cache)}"
+        f"seeded source_files={counts['source_files']} "
+        f"trend_queries={counts['trend_queries']} "
+        f"translation_cache={counts['translation_cache']}"
     )
 
 

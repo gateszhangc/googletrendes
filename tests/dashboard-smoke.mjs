@@ -63,6 +63,27 @@ try {
     return resultCount.includes(expected);
   }, selectedDateRows);
 
+  const typeOptions = await page.locator("#queryType option").allTextContents();
+  if (typeOptions.length !== 3) {
+    throw new Error(`expected 3 query type options, got ${JSON.stringify(typeOptions)}`);
+  }
+  const risingSummary = await page.evaluate(async (date) => {
+    const response = await fetch(
+      `/api/trends?collected_date=${encodeURIComponent(date)}&type=rising&limit=1`
+    );
+    return response.json();
+  }, selectedDate);
+  await page.selectOption("#queryType", "rising");
+  await page.waitForFunction((expected) => {
+    const resultCount = document.querySelector("#resultCount")?.textContent || "";
+    return resultCount.includes(expected);
+  }, formatNumber(risingSummary.total));
+  await page.selectOption("#queryType", "");
+  await page.waitForFunction((expected) => {
+    const resultCount = document.querySelector("#resultCount")?.textContent || "";
+    return resultCount.includes(expected);
+  }, selectedDateRows);
+
   await page.fill("#search", searchTerm);
   await page.waitForFunction((expected) => {
     const rows = document.querySelector("#rows")?.textContent || "";

@@ -7,9 +7,12 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from trends_db import migrate_schema
+
 
 DEFAULT_INPUT_DIR = Path("2026-06-04")
 DEFAULT_DB = Path("data/google_trends.sqlite")
+TYPES = ("top", "rising")
 
 
 def utc_now():
@@ -24,16 +27,28 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def source_metadata(path):
+    """Return (collected_date, query_type) for a google_trends_<type>_<date>*.tsv file."""
+    match = re.match(r"google_trends_(top|rising)_(\d{4}-\d{2}-\d{2})", Path(path).name)
+    if not match:
+        return "", ""
+    return match.group(2), match.group(1)
+
+
 def parse_change(value):
     raw = (value or "").strip()
     if not raw:
         return None, 0
-    if raw in {"飙升", "Breakout"}:
+    if raw in {"飙升", "暴增", "Breakout", "breakout"}:
         return None, 1
-    match = re.search(r"([\d,.]+)", raw)
+    match = re.search(r"(-\s*)?([\d,.]+)", raw)
     if not match:
         return None, 0
-    return int(match.group(1).replace(",", "").replace(".", "")), 0
+    sign = -1 if match.group(1) else 1
+    digits = match.group(2).replace(",", "")
+    if re.fullmatch(r"\d+\.\d+", digits):
+        return sign * int(float(digits)), 0
+    return sign * int(digits.replace(".", "")), 0
 
 
 def connect(db_path):
@@ -49,7 +64,9 @@ def connect(db_path):
           name text not null,
           sha256 text not null,
           mtime real not null,
-          imported_at text not null
+          imported_at text not null,
+          collected_date text not null default '',
+          query_type text not null default ''
         );
 
         create table if not exists trend_queries (
@@ -82,6 +99,7 @@ def connect(db_path):
         create index if not exists idx_trend_query on trend_queries(query);
         """
     )
+    migrate_schema(conn)
     return conn
 
 
@@ -89,17 +107,20 @@ def import_file(conn, path):
     now = utc_now()
     digest = sha256_file(path)
     stat = path.stat()
+    collected_date, query_type = source_metadata(path)
     conn.execute(
         """
-        insert into source_files(path, name, sha256, mtime, imported_at)
-        values (?, ?, ?, ?, ?)
+        insert into source_files(path, name, sha256, mtime, imported_at, collected_date, query_type)
+        values (?, ?, ?, ?, ?, ?, ?)
         on conflict(path) do update set
           name=excluded.name,
           sha256=excluded.sha256,
           mtime=excluded.mtime,
-          imported_at=excluded.imported_at
+          imported_at=excluded.imported_at,
+          collected_date=excluded.collected_date,
+          query_type=excluded.query_type
         """,
-        (str(path), path.name, digest, stat.st_mtime, now),
+        (str(path), path.name, digest, stat.st_mtime, now, collected_date, query_type),
     )
     source_file_id = conn.execute(
         "select id from source_files where path = ?",
@@ -158,9 +179,15 @@ def main():
 
     input_dir = Path(args.input_dir)
     date_pattern = args.date or input_dir.name
-    files = sorted(input_dir.glob(f"google_trends_rising_{date_pattern}*.tsv"))
+    files = sorted(
+        file
+        for query_type in TYPES
+        for file in input_dir.glob(f"google_trends_{query_type}_{date_pattern}*.tsv")
+    )
     if not files:
-        raise SystemExit(f"no google trends TSV files matching {date_pattern} found in {input_dir}")
+        raise SystemExit(
+            f"no google_trends_top/rising TSV files matching {date_pattern} found in {input_dir}"
+        )
 
     conn = connect(Path(args.db))
     total = 0

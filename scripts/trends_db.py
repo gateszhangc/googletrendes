@@ -11,7 +11,9 @@ create table if not exists source_files (
   name text not null,
   sha256 text not null,
   mtime real not null,
-  imported_at text not null
+  imported_at text not null,
+  collected_date text not null default '',
+  query_type text not null default ''
 );
 
 create table if not exists trend_queries (
@@ -54,7 +56,9 @@ create table if not exists source_files (
   name text not null,
   sha256 text not null,
   mtime double precision not null,
-  imported_at text not null
+  imported_at text not null,
+  collected_date text not null default '',
+  query_type text not null default ''
 );
 
 create table if not exists trend_queries (
@@ -138,6 +142,72 @@ def connect(db_path=None, database_url=None):
     return connect_sqlite(db_path)
 
 
+SOURCE_FILE_COLUMNS = {
+    "collected_date": "text not null default ''",
+    "query_type": "text not null default ''",
+}
+
+
+def _existing_columns(conn, database_url, table):
+    if is_postgres_url(database_url):
+        rows = conn.execute(
+            "select column_name from information_schema.columns where table_name = %s",
+            (table,),
+        ).fetchall()
+        names = set()
+        for row in rows:
+            if isinstance(row, dict):
+                names.add(row["column_name"])
+            else:
+                names.add(row[0])
+        return names
+
+    names = set()
+    for row in conn.execute(f"pragma table_info({table})").fetchall():
+        if isinstance(row, dict):
+            names.add(row["name"])
+        else:
+            names.add(row[1])
+    return names
+
+
+def backfill_source_metadata(conn, database_url=""):
+    """Derive collected_date/query_type for rows imported before those columns existed."""
+    if is_postgres_url(database_url):
+        date_expr = "substring(name from 22 for 10)"
+    else:
+        date_expr = "substr(name, 22, 10)"
+    type_expr = (
+        "case when name like 'google_trends_top%' then 'top' "
+        "when name like 'google_trends_rising%' then 'rising' else '' end"
+    )
+    conn.execute(
+        f"""
+        update source_files
+        set collected_date = {date_expr}
+        where coalesce(collected_date, '') = ''
+          and name like 'google_trends_rising_%'
+        """
+    )
+    conn.execute(
+        f"""
+        update source_files
+        set query_type = {type_expr}
+        where coalesce(query_type, '') = ''
+          and name like 'google_trends_%'
+        """
+    )
+
+
+def migrate_schema(conn, database_url=""):
+    """Add columns introduced after the first release; safe to run repeatedly."""
+    existing = _existing_columns(conn, database_url, "source_files")
+    for column, ddl in SOURCE_FILE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"alter table source_files add column {column} {ddl}")
+    backfill_source_metadata(conn, database_url)
+
+
 def ensure_schema(conn, database_url=""):
     if is_postgres_url(database_url):
         for statement in POSTGRES_SCHEMA.strip().split(";"):
@@ -145,6 +215,7 @@ def ensure_schema(conn, database_url=""):
                 conn.execute(statement)
     else:
         conn.executescript(SQLITE_SCHEMA)
+    migrate_schema(conn, database_url)
 
 
 def driver_name(database_url=""):

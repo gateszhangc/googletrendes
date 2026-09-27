@@ -2,7 +2,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:dashboard": "node tests/dashboard-smoke.mjs"
+    "test:dashboard": "node tests/dashboard-smoke.mjs",
+    "test:ingest": "node tests/ingest-api.test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.55.1"

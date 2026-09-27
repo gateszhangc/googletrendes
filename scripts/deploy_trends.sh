@@ -114,7 +114,7 @@ log "Scanning official TSV files"
 FILES=()
 while IFS= read -r file; do
   FILES+=("$file")
-done < <(find "$DATA_DIR" -maxdepth 1 -type f -name "google_trends_rising_${DATE}*.tsv" -print | sort)
+done < <(find "$DATA_DIR" -maxdepth 1 -type f \( -name "google_trends_rising_${DATE}*.tsv" -o -name "google_trends_top_${DATE}*.tsv" \) -print | sort)
 
 [[ ${#FILES[@]} -gt 0 ]] || fail "No official TSV files found in $DATA_DIR"
 for file in "${FILES[@]}"; do

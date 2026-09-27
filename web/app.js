@@ -9,7 +9,7 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
-const filters = ["collectedDate", "search", "geo", "category", "queryMode", "translated", "change"];
+const filters = ["collectedDate", "search", "geo", "category", "queryType", "queryMode", "translated", "change"];
 
 function formatNumber(value) {
   return new Intl.NumberFormat("zh-CN").format(value || 0);
@@ -39,6 +39,8 @@ function params() {
       query.set("collected_date", value);
     } else if (id === "queryMode" && value === "unique") {
       query.set("unique", "yes");
+    } else if (id === "queryType") {
+      query.set("type", value);
     } else if (id !== "queryMode") {
       query.set(id, value);
     }

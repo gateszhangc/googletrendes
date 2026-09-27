@@ -76,3 +76,39 @@ scripts/deploy_trends.sh --import-only
 4. 验证 `/healthz`、`/api/facets` 和生产首页。
 
 发布前必须记录上一个稳定镜像和 ArgoCD revision，保证可以执行上述回滚。
+
+## 数据库与直传接口
+
+生产环境使用 Postgres（`DATABASE_URL`）；没有 `DATABASE_URL` 时仍按旧的
+`data/google_trends.sqlite` 方式运行，本地导入/发布脚本继续可用。
+
+- 应用启动时执行 `ensure_schema()`；Postgres 为空且 `data/google_trends.sqlite`
+  存在时会自动把 SQLite 全量 seed 进 Postgres（也可手动运行
+  `scripts/seed_postgres_from_sqlite.py`）。
+- `source_files` 新增 `collected_date`、`query_type`（`top`/`rising`）两列，历史行由
+  `ensure_schema()` 自动回填。
+- Chrome 扩展通过 `POST /api/ingest` 直传，需要 `INGEST_TOKEN`，请求头
+  `authorization: Bearer <token>`：
+
+  ```json
+  {"batch":{"type":"top","geo":"US","category":"餐饮","date_range":"now 7-d",
+            "collected_date":"2026-09-27","term":"south","source":"extension"},
+   "rows":[{"rank":1,"query":"amazon","change":"-4%"}]}
+  ```
+
+  响应包含 `source_file`、`inserted`、`translated`、`pending_translation`、`deduped`
+  （同一份内容重复上传按 sha256 去重）。上传行不保存页面自带翻译。
+- ingest 时用 `DEEPSEEK_API_KEY`（`DEEPSEEK_BASE_URL`/`DEEPSEEK_MODEL` 可选）或
+  `ANTHROPIC_AUTH_TOKEN` 即时生成 AI 翻译并写入 `translation_cache`；没有配置凭证时
+  仍可入库，`pending_translation` 提示待补数量。补翻译可运行：
+
+  ```bash
+  python3 scripts/translate_trends_sqlite.py --database-url "$DATABASE_URL" --limit 0
+  ```
+
+## 测试
+
+```bash
+npm run test:ingest      # 直传接口（含翻译桩）
+npm run test:dashboard   # 需要先启动本地 dashboard 并设置 DASHBOARD_URL
+```
