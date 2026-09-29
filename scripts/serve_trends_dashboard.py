@@ -21,6 +21,8 @@ from trends_translate import provider_config, translate_source_file
 DEFAULT_DB = Path("data/google_trends.sqlite")
 DEFAULT_WEB = Path("web")
 MAX_INGEST_BYTES = 8 * 1024 * 1024
+MAX_SUBMIT_ITEMS = 1000
+SUBMIT_CHECK_STATUSES = {"hit", "miss", "failed", "pending"}
 
 
 class IngestError(Exception):
@@ -99,6 +101,8 @@ class TrendsHandler(BaseHTTPRequestHandler):
             return self.api_trends(parse_qs(parsed.query))
         if parsed.path == "/api/chart":
             return self.api_chart()
+        if parsed.path == "/api/submit-sites":
+            return self.send_json(self.list_submit_sites(parsed.query))
 
         relative = parsed.path.lstrip("/") or "index.html"
         if ".." in Path(relative).parts:
@@ -108,7 +112,7 @@ class TrendsHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         parsed = urlparse(self.path)
-        if parsed.path != "/api/ingest":
+        if parsed.path not in {"/api/ingest", "/api/submit-sites"}:
             return self.send_json({"ok": False, "error": "not found"}, status=404)
         self.send_response(204)
         self.send_header("access-control-allow-origin", self.headers.get("origin") or "*")
@@ -117,33 +121,49 @@ class TrendsHandler(BaseHTTPRequestHandler):
         self.send_header("access-control-max-age", "600")
         self.end_headers()
 
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path != "/api/ingest":
-            return self.send_json({"ok": False, "error": "not found"}, status=404)
+    def authorized(self):
         if not self.ingest_token:
-            return self.send_json({"ok": False, "error": "ingest disabled"}, status=503)
-
+            self.send_json({"ok": False, "error": "ingest disabled"}, status=503)
+            return False
         header = self.headers.get("authorization", "")
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
         if not token or not secrets.compare_digest(token, self.ingest_token):
-            return self.send_json({"ok": False, "error": "unauthorized"}, status=401)
+            self.send_json({"ok": False, "error": "unauthorized"}, status=401)
+            return False
+        return True
 
+    def read_json_payload(self):
         length = int(self.headers.get("content-length") or 0)
         if length <= 0:
-            return self.send_json({"ok": False, "error": "empty body"}, status=400)
+            self.send_json({"ok": False, "error": "empty body"}, status=400)
+            return None
         if length > MAX_INGEST_BYTES:
-            return self.send_json({"ok": False, "error": "body too large"}, status=413)
-
+            self.send_json({"ok": False, "error": "body too large"}, status=413)
+            return None
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except Exception as error:
-            return self.send_json({"ok": False, "error": f"invalid json: {error}"}, status=400)
+            self.send_json({"ok": False, "error": f"invalid json: {error}"}, status=400)
+            return None
         if not isinstance(payload, dict):
-            return self.send_json({"ok": False, "error": "payload must be an object"}, status=400)
+            self.send_json({"ok": False, "error": "payload must be an object"}, status=400)
+            return None
+        return payload
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path not in {"/api/ingest", "/api/submit-sites"}:
+            return self.send_json({"ok": False, "error": "not found"}, status=404)
+        if not self.authorized():
+            return
+        payload = self.read_json_payload()
+        if payload is None:
+            return
         try:
-            result = self.ingest_batch(payload)
+            if parsed.path == "/api/ingest":
+                result = self.ingest_batch(payload)
+            else:
+                result = self.upsert_submit_sites(payload)
         except IngestError as error:
             return self.send_json({"ok": False, "error": str(error)}, status=400)
         except Exception as error:
@@ -296,6 +316,168 @@ class TrendsHandler(BaseHTTPRequestHandler):
             "translated": translated,
             "pending_translation": pending,
         }
+
+    def clean_submit_items(self, items):
+        if not isinstance(items, list) or not items:
+            raise IngestError("items must be a non-empty list")
+        if len(items) > MAX_SUBMIT_ITEMS:
+            raise IngestError(f"items must contain at most {MAX_SUBMIT_ITEMS} entries")
+
+        def text(entry, key, limit):
+            return str(entry.get(key) or "").strip()[:limit]
+
+        def integer(entry, key):
+            try:
+                return int(entry.get(key))
+            except (TypeError, ValueError):
+                return None
+
+        cleaned = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                cleaned.append(None)
+                continue
+            host = str(entry.get("host") or "").strip().lower()
+            host = re.sub(r"^[a-z]+://", "", host)
+            host = host.split("/")[0].split("?")[0].split(":")[0]
+            if host.startswith("www."):
+                host = host[4:]
+            if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]{0,252}", host) or "." not in host:
+                cleaned.append(None)
+                continue
+            check_status = text(entry, "checkStatus", 20).lower()
+            if check_status not in SUBMIT_CHECK_STATUSES:
+                check_status = "pending"
+            has_submit = entry.get("hasSubmit") is True or check_status == "hit"
+            cleaned.append(
+                {
+                    "host": host,
+                    "url": text(entry, "url", 500),
+                    "source_report": text(entry, "sourceReport", 200),
+                    "as_score": integer(entry, "as"),
+                    "backlinks": integer(entry, "backlinks"),
+                    "status_label": text(entry, "status", 40),
+                    "first_seen": text(entry, "firstSeen", 80),
+                    "last_seen": text(entry, "lastSeen", 80),
+                    "has_submit": 1 if has_submit else 0,
+                    "check_status": check_status,
+                    "category": text(entry, "category", 60),
+                    "evidence": text(entry, "evidence", 300),
+                    "submit_url": text(entry, "submitUrl", 500),
+                    "check_error": text(entry, "checkError", 300),
+                    "checked_at": text(entry, "checkedAt", 40),
+                }
+            )
+        return cleaned
+
+    def upsert_submit_sites(self, payload):
+        cleaned = self.clean_submit_items(payload.get("items"))
+        mark = placeholder(self.database_url)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        inserted = updated = skipped = 0
+        with self.db() as conn:
+            for item in cleaned:
+                if item is None:
+                    skipped += 1
+                    continue
+                existing = conn.execute(
+                    f"select 1 from submit_sites where host = {mark}", (item["host"],)
+                ).fetchone()
+                if existing:
+                    updated += 1
+                else:
+                    inserted += 1
+                conn.execute(
+                    f"""
+                    insert into submit_sites(
+                      host, url, source_report, as_score, backlinks, status_label,
+                      first_seen, last_seen, has_submit, check_status, category,
+                      evidence, submit_url, check_error, checked_at,
+                      first_saved_at, updated_at
+                    )
+                    values (
+                      {mark}, {mark}, {mark}, {mark}, {mark}, {mark}, {mark}, {mark},
+                      {mark}, {mark}, {mark}, {mark}, {mark}, {mark}, {mark}, {mark}, {mark}
+                    )
+                    on conflict(host) do update set
+                      url = excluded.url,
+                      source_report = excluded.source_report,
+                      as_score = excluded.as_score,
+                      backlinks = excluded.backlinks,
+                      status_label = excluded.status_label,
+                      first_seen = excluded.first_seen,
+                      last_seen = excluded.last_seen,
+                      has_submit = excluded.has_submit,
+                      check_status = excluded.check_status,
+                      category = excluded.category,
+                      evidence = excluded.evidence,
+                      submit_url = excluded.submit_url,
+                      check_error = excluded.check_error,
+                      checked_at = excluded.checked_at,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        item["host"],
+                        item["url"],
+                        item["source_report"],
+                        item["as_score"],
+                        item["backlinks"],
+                        item["status_label"],
+                        item["first_seen"],
+                        item["last_seen"],
+                        item["has_submit"],
+                        item["check_status"],
+                        item["category"],
+                        item["evidence"],
+                        item["submit_url"],
+                        item["check_error"],
+                        item["checked_at"],
+                        now,
+                        now,
+                    ),
+                )
+        return {"ok": True, "inserted": inserted, "updated": updated, "skipped": skipped}
+
+    def list_submit_sites(self, query):
+        params = parse_qs(query)
+        mark = placeholder(self.database_url)
+        where = []
+        args = []
+        has_submit = (params.get("has_submit") or [""])[0].strip().lower()
+        if has_submit in {"1", "true", "yes"}:
+            where.append("has_submit = 1")
+        elif has_submit in {"0", "false", "no"}:
+            where.append("has_submit = 0")
+        search = (params.get("q") or [""])[0].strip().lower()
+        if search:
+            where.append(f"host like {mark}")
+            args.append(f"%{search}%")
+        try:
+            limit = int((params.get("limit") or ["200"])[0])
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        try:
+            offset = int((params.get("offset") or ["0"])[0])
+        except ValueError:
+            offset = 0
+        offset = max(0, offset)
+        clause = f"where {' and '.join(where)}" if where else ""
+        with self.db() as conn:
+            total_row = conn.execute(
+                f"select count(*) as total from submit_sites {clause}", tuple(args)
+            ).fetchone()
+            total = total_row["total"] if isinstance(total_row, dict) else total_row[0]
+            rows = conn.execute(
+                f"""
+                select * from submit_sites
+                {clause}
+                order by has_submit desc, updated_at desc, host asc
+                limit {mark} offset {mark}
+                """,
+                tuple(args) + (limit, offset),
+            ).fetchall()
+        return {"ok": True, "total": total, "items": [dict(row) for row in rows]}
 
     def healthz(self):
         try:

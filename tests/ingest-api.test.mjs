@@ -7,6 +7,29 @@ import { join } from "node:path";
 const projectRoot = new URL("..", import.meta.url).pathname;
 const token = "test-ingest-token";
 
+// submit_sites 只加在 Postgres schema 里（生产库）；本地 SQLite 测试用同样的 DDL 建表。
+const SUBMIT_SITES_DDL = `
+create table if not exists submit_sites (
+  host text primary key,
+  url text not null default '',
+  source_report text not null default '',
+  as_score integer,
+  backlinks integer,
+  status_label text not null default '',
+  first_seen text not null default '',
+  last_seen text not null default '',
+  has_submit integer not null default 0,
+  check_status text not null default 'pending',
+  category text not null default '',
+  evidence text not null default '',
+  submit_url text not null default '',
+  check_error text not null default '',
+  checked_at text not null default '',
+  first_saved_at text not null default '',
+  updated_at text not null default ''
+);
+`;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function assert(condition, message) {
@@ -104,6 +127,28 @@ async function postIngest(baseUrl, payload, options = {}) {
   return { status: response.status, body };
 }
 
+async function postSubmitSites(baseUrl, payload, options = {}) {
+  const response = await fetch(`${baseUrl}/api/submit-sites`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(options.authorized === false ? {} : { authorization: `Bearer ${token}` }),
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => ({}));
+  return { status: response.status, body };
+}
+
+function seedSubmitSitesTable(dbPath) {
+  const result = spawn("python3", ["-c", `import sqlite3,sys; conn=sqlite3.connect(sys.argv[1]); conn.executescript(sys.argv[2]); conn.commit()`, dbPath, SUBMIT_SITES_DDL], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return new Promise((resolve, reject) => {
+    result.on("close", (code) => (code === 0 ? resolve() : reject(new Error("failed to seed submit_sites table"))));
+  });
+}
+
 const workDir = await mkdtemp(join(tmpdir(), "gt-ingest-"));
 const dbPath = join(workDir, "trends.sqlite");
 const port = 18700 + Math.floor(Math.random() * 200);
@@ -117,6 +162,74 @@ const dashboard = await startDashboard({
 
 try {
   await waitForHealth(baseUrl);
+  await seedSubmitSitesTable(dbPath);
+
+  const unauthorizedSubmit = await postSubmitSites(
+    baseUrl,
+    { items: [{ host: "awesome.video" }] },
+    { authorized: false }
+  );
+  assert(unauthorizedSubmit.status === 401, `expected 401 for submit-sites, got ${unauthorizedSubmit.status}`);
+
+  const emptySubmit = await postSubmitSites(baseUrl, { items: [] });
+  assert(emptySubmit.status === 400, `expected 400 for empty submit-sites payload, got ${emptySubmit.status}`);
+
+  const firstSubmit = await postSubmitSites(baseUrl, {
+    source: "submit-entry-checker",
+    report_domain: "byteplus.com",
+    items: [
+      {
+        host: "https://www.Awesome.video/",
+        url: "https://awesome.video/",
+        as: 19,
+        backlinks: 1,
+        status: "新增",
+        firstSeen: "2026年8月3日",
+        lastSeen: "12 天前",
+        hasSubmit: true,
+        checkStatus: "hit",
+        category: "submit_text",
+        evidence: "Submit",
+        submitUrl: "https://awesome.video/submit",
+        checkedAt: "2026-09-29T06:35:00Z",
+      },
+      { host: "example.com", checkStatus: "miss", hasSubmit: false },
+      { host: "not a host", checkStatus: "miss" },
+    ],
+  });
+  assert(firstSubmit.status === 200, `expected 200 for submit-sites, got ${firstSubmit.status}`);
+  assert(firstSubmit.body.inserted === 2, `expected 2 inserted sites, got ${firstSubmit.body.inserted}`);
+  assert(firstSubmit.body.skipped === 1, `expected 1 skipped site, got ${firstSubmit.body.skipped}`);
+
+  const hitSites = await (await fetch(`${baseUrl}/api/submit-sites?has_submit=1`)).json();
+  assert(hitSites.total === 1, `expected 1 submit hit, got ${hitSites.total}`);
+  assert(hitSites.items[0].host === "awesome.video", `unexpected hit host: ${hitSites.items[0].host}`);
+  assert(hitSites.items[0].has_submit === 1, "expected has_submit=1 on the hit");
+  assert(
+    hitSites.items[0].submit_url === "https://awesome.video/submit",
+    `unexpected submit url: ${hitSites.items[0].submit_url}`
+  );
+  assert(hitSites.items[0].as_score === 19, `unexpected as_score: ${hitSites.items[0].as_score}`);
+
+  const secondSubmit = await postSubmitSites(baseUrl, {
+    items: [{ host: "awesome.video", checkStatus: "miss", hasSubmit: false, evidence: "no longer" }],
+  });
+  assert(secondSubmit.body.updated === 1, `expected 1 updated site, got ${secondSubmit.body.updated}`);
+  assert(secondSubmit.body.inserted === 0, "expected no inserts on the second upload");
+
+  const allSites = await (await fetch(`${baseUrl}/api/submit-sites`)).json();
+  assert(allSites.total === 2, `expected 2 sites, got ${allSites.total}`);
+  const updatedSite = allSites.items.find((item) => item.host === "awesome.video");
+  assert(updatedSite.has_submit === 0, "expected has_submit to be cleared by the second upload");
+  assert(updatedSite.evidence === "no longer", `unexpected evidence: ${updatedSite.evidence}`);
+  assert(
+    allSites.items[0].has_submit === 0,
+    "expected sites to be ordered by has_submit desc then updated_at"
+  );
+
+  const searched = await (await fetch(`${baseUrl}/api/submit-sites?q=awesome`)).json();
+  assert(searched.total === 1, `expected 1 search result, got ${searched.total}`);
+  assert(searched.items[0].host === "awesome.video", "unexpected search result host");
 
   const unauthorized = await postIngest(
     baseUrl,

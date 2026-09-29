@@ -91,6 +91,28 @@ create index if not exists idx_trend_change_value on trend_queries(change_value)
 create index if not exists idx_trend_query on trend_queries(query);
 create index if not exists idx_trend_source_file_row on trend_queries(source_file_id, source_row);
 create index if not exists idx_trend_query_id on trend_queries(query, id);
+
+create table if not exists submit_sites (
+  host text primary key,
+  url text not null default '',
+  source_report text not null default '',
+  as_score integer,
+  backlinks integer,
+  status_label text not null default '',
+  first_seen text not null default '',
+  last_seen text not null default '',
+  has_submit integer not null default 0,
+  check_status text not null default 'pending',
+  category text not null default '',
+  evidence text not null default '',
+  submit_url text not null default '',
+  check_error text not null default '',
+  checked_at text not null default '',
+  first_saved_at text not null default '',
+  updated_at text not null default ''
+);
+
+create index if not exists idx_submit_sites_has_submit on submit_sites(has_submit);
 """
 
 

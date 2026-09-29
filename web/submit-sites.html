@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>提交入口站点 · Trends Atlas</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="workspace">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Submit Entry Checker</p>
+        <h1>提交入口站点</h1>
+      </div>
+      <div class="toolbar">
+        <a class="soft-button" href="/">← 回到 Trends 工作台</a>
+        <button id="exportButton" class="soft-button" type="button">导出 CSV</button>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="table-toolbar">
+        <div class="filter-group">
+          <label>筛选</label>
+          <select id="hasSubmitFilter">
+            <option value="">全部站点</option>
+            <option value="1">只看 submit 命中</option>
+            <option value="0">只看未命中</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>搜索域名</label>
+          <input id="search" type="search" placeholder="例如 backlink 或 awesome.video">
+        </div>
+        <div class="filter-group">
+          <label>条数</label>
+          <select id="limit">
+            <option value="100">100</option>
+            <option value="200" selected>200</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+          </select>
+        </div>
+        <p id="status" class="status-pill">加载中…</p>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>域名</th>
+              <th>Submit</th>
+              <th>检测</th>
+              <th>AS</th>
+              <th>Backlinks</th>
+              <th>来源报表</th>
+              <th>证据 / 提交入口</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button id="prevButton" class="soft-button" type="button">上一页</button>
+        <span id="pageLabel">第 1 页</span>
+        <button id="nextButton" class="soft-button" type="button">下一页</button>
+      </div>
+    </section>
+  </div>
+  <script src="/submit-sites.js"></script>
+</body>
+</html>
