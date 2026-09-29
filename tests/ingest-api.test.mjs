@@ -210,9 +210,22 @@ try {
     `unexpected submit url: ${hitSites.items[0].submit_url}`
   );
   assert(hitSites.items[0].as_score === 19, `unexpected as_score: ${hitSites.items[0].as_score}`);
+  assert(
+    hitSites.items[0].source_report === "byteplus.com",
+    `expected report_domain fallback on the hit, got ${hitSites.items[0].source_report}`
+  );
 
   const secondSubmit = await postSubmitSites(baseUrl, {
-    items: [{ host: "awesome.video", checkStatus: "miss", hasSubmit: false, evidence: "no longer" }],
+    report_domain: "byteplus.com",
+    items: [
+      {
+        host: "awesome.video",
+        checkStatus: "miss",
+        hasSubmit: false,
+        evidence: "no longer",
+        sourceReport: "explicit.example",
+      },
+    ],
   });
   assert(secondSubmit.body.updated === 1, `expected 1 updated site, got ${secondSubmit.body.updated}`);
   assert(secondSubmit.body.inserted === 0, "expected no inserts on the second upload");
@@ -225,6 +238,22 @@ try {
   assert(
     allSites.items[0].has_submit === 0,
     "expected sites to be ordered by has_submit desc then updated_at"
+  );
+  assert(
+    updatedSite.source_report === "explicit.example",
+    `expected per-item sourceReport to win, got ${updatedSite.source_report}`
+  );
+
+  // 逐条没带 sourceReport 时，用请求里的 report_domain 兜底。
+  const fallbackSubmit = await postSubmitSites(baseUrl, {
+    report_domain: "fallback.example",
+    items: [{ host: "fallback-site.com", checkStatus: "miss", hasSubmit: false }],
+  });
+  assert(fallbackSubmit.body.inserted === 1, `expected 1 inserted site, got ${fallbackSubmit.body.inserted}`);
+  const fallbackSites = await (await fetch(`${baseUrl}/api/submit-sites?q=fallback-site`)).json();
+  assert(
+    fallbackSites.items[0].source_report === "fallback.example",
+    `expected report_domain fallback, got ${fallbackSites.items[0].source_report}`
   );
 
   const searched = await (await fetch(`${baseUrl}/api/submit-sites?q=awesome`)).json();
@@ -334,6 +363,66 @@ try {
 
   const summary = await (await fetch(`${baseUrl}/api/summary`)).json();
   assert(summary.rows === 8, `expected 8 rows in summary, got ${summary.rows}`);
+
+  // 国家 / 分类排序：再入一批 BR + 体育，验证排序参数作用在整个结果集上。
+  const brBatch = await postIngest(baseUrl, {
+    batch: {
+      type: "top",
+      geo: "BR",
+      category: "体育",
+      date_range: "now 7-d",
+      collected_date: "2026-09-27",
+      term: "brasil",
+    },
+    rows: [
+      { rank: 1, query: "flamengo", change: "暴增" },
+      { rank: 2, query: "palmeiras", change: "+50%" },
+    ],
+  });
+  assert(brBatch.status === 200, `expected 200 for BR batch, got ${brBatch.status}`);
+
+  const geoAsc = await (await fetch(`${baseUrl}/api/trends?sort=geo&order=asc&limit=20`)).json();
+  assert(geoAsc.total === 10, `expected 10 rows after BR ingest, got ${geoAsc.total}`);
+  assert(geoAsc.rows[0].geo === "BR", `expected BR first on geo asc, got ${geoAsc.rows[0].geo}`);
+  assert(
+    geoAsc.rows.every((row, index) => index === 0 || geoAsc.rows[index - 1].geo <= row.geo),
+    "expected geo asc rows to be ordered"
+  );
+  const geoDesc = await (await fetch(`${baseUrl}/api/trends?sort=geo&order=desc&limit=20`)).json();
+  assert(geoDesc.rows[0].geo === "US", `expected US first on geo desc, got ${geoDesc.rows[0].geo}`);
+  assert(
+    geoDesc.rows.every((row, index) => index === 0 || geoDesc.rows[index - 1].geo >= row.geo),
+    "expected geo desc rows to be ordered"
+  );
+
+  const categoryAsc = await (await fetch(`${baseUrl}/api/trends?sort=category&order=asc&limit=20`)).json();
+  const categoryDesc = await (await fetch(`${baseUrl}/api/trends?sort=category&order=desc&limit=20`)).json();
+  assert(categoryAsc.rows[0].category === "体育", `expected 体育 first on category asc, got ${categoryAsc.rows[0].category}`);
+  assert(categoryDesc.rows[0].category === "餐饮", `expected 餐饮 first on category desc, got ${categoryDesc.rows[0].category}`);
+  assert(
+    categoryAsc.rows.every((row, index) => index === 0 || categoryAsc.rows[index - 1].category <= row.category),
+    "expected category asc rows to be ordered"
+  );
+  assert(
+    categoryDesc.rows.every((row, index) => index === 0 || categoryDesc.rows[index - 1].category >= row.category),
+    "expected category desc rows to be ordered"
+  );
+  assert(
+    JSON.stringify(categoryDesc.rows.map((row) => row.query).sort()) ===
+      JSON.stringify(categoryAsc.rows.map((row) => row.query).sort()),
+    "expected category desc to cover the same rows as category asc"
+  );
+
+  const uniqueGeoAsc = await (await fetch(`${baseUrl}/api/trends?unique=yes&sort=geo&order=asc&limit=20`)).json();
+  assert(uniqueGeoAsc.rows[0].geo === "BR", `expected BR first on unique geo asc, got ${uniqueGeoAsc.rows[0].geo}`);
+
+  // 未在允许列表里的 sort 值按默认排序处理，不能拼进 SQL。
+  const defaultRows = await (await fetch(`${baseUrl}/api/trends?limit=20`)).json();
+  const bogusSort = await (await fetch(`${baseUrl}/api/trends?sort=geo%3Bdrop%20table&order=desc&limit=20`)).json();
+  assert(
+    JSON.stringify(bogusSort.rows.map((row) => row.id)) === JSON.stringify(defaultRows.rows.map((row) => row.id)),
+    "expected unknown sort values to fall back to the default order"
+  );
 
   console.log("ingest api tests passed");
 } catch (error) {

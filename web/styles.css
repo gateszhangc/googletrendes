@@ -37,6 +37,7 @@ body {
   position: sticky;
   top: 0;
   height: 100vh;
+  overflow-y: auto;
   padding: 22px;
   background: rgba(255, 255, 255, 0.74);
   border-right: 1px solid rgba(231, 223, 208, 0.9);
@@ -320,6 +321,30 @@ th {
   color: #4a5368;
   background: #fffaf0;
   font-size: 12px;
+}
+
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+th.sortable:hover {
+  color: #1f2a44;
+}
+
+th.sortable .sort-arrow {
+  margin-left: 4px;
+  color: #b9b2a4;
+  font-size: 11px;
+}
+
+th.sortable.is-sorted {
+  color: #1f2a44;
+}
+
+th.sortable.is-sorted .sort-arrow {
+  color: #6c8cff;
 }
 
 td.query {

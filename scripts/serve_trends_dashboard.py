@@ -23,6 +23,10 @@ DEFAULT_WEB = Path("web")
 MAX_INGEST_BYTES = 8 * 1024 * 1024
 MAX_SUBMIT_ITEMS = 1000
 SUBMIT_CHECK_STATUSES = {"hit", "miss", "failed", "pending"}
+SORT_COLUMNS = {
+    "geo": "tq.geo",
+    "category": "tq.category",
+}
 
 
 class IngestError(Exception):
@@ -317,11 +321,13 @@ class TrendsHandler(BaseHTTPRequestHandler):
             "pending_translation": pending,
         }
 
-    def clean_submit_items(self, items):
+    def clean_submit_items(self, items, default_report=""):
         if not isinstance(items, list) or not items:
             raise IngestError("items must be a non-empty list")
         if len(items) > MAX_SUBMIT_ITEMS:
             raise IngestError(f"items must contain at most {MAX_SUBMIT_ITEMS} entries")
+
+        fallback_report = str(default_report or "").strip()[:200]
 
         def text(entry, key, limit):
             return str(entry.get(key) or "").strip()[:limit]
@@ -353,7 +359,8 @@ class TrendsHandler(BaseHTTPRequestHandler):
                 {
                     "host": host,
                     "url": text(entry, "url", 500),
-                    "source_report": text(entry, "sourceReport", 200),
+                    # 逐条的 sourceReport 优先，缺失时用请求里的 report_domain（被分析的域名）。
+                    "source_report": text(entry, "sourceReport", 200) or fallback_report,
                     "as_score": integer(entry, "as"),
                     "backlinks": integer(entry, "backlinks"),
                     "status_label": text(entry, "status", 40),
@@ -371,7 +378,8 @@ class TrendsHandler(BaseHTTPRequestHandler):
         return cleaned
 
     def upsert_submit_sites(self, payload):
-        cleaned = self.clean_submit_items(payload.get("items"))
+        report_domain = str(payload.get("report_domain") or payload.get("reportDomain") or "").strip()[:200]
+        cleaned = self.clean_submit_items(payload.get("items"), report_domain)
         mark = placeholder(self.database_url)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         inserted = updated = skipped = 0
@@ -643,6 +651,12 @@ class TrendsHandler(BaseHTTPRequestHandler):
         limit = min(max(int(params.get("limit", ["80"])[0] or 80), 1), 300)
         offset = max(int(params.get("offset", ["0"])[0] or 0), 0)
         mark = placeholder(self.database_url)
+        sort_column = SORT_COLUMNS.get((params.get("sort", [""])[0] or "").strip().lower())
+        if sort_column:
+            sort_order = "desc" if (params.get("order", [""])[0] or "").strip().lower() == "desc" else "asc"
+            order_by = f"order by {sort_column} {sort_order}, tq.id asc"
+        else:
+            order_by = "order by sf.path asc, tq.source_row asc"
 
         with self.db() as conn:
             if unique:
@@ -688,7 +702,7 @@ class TrendsHandler(BaseHTTPRequestHandler):
                     from first_rows fr
                     join trend_queries tq on tq.id = fr.id
                     join source_files sf on sf.id = tq.source_file_id
-                    order by sf.path asc, tq.source_row asc
+                    {order_by}
                     limit {mark} offset {mark}
                     """,
                     [*values, limit, offset],
@@ -721,7 +735,7 @@ class TrendsHandler(BaseHTTPRequestHandler):
                     from trend_queries tq
                     join source_files sf on sf.id = tq.source_file_id
                     {clause}
-                    order by sf.path asc, tq.source_row asc
+                    {order_by}
                     limit {mark} offset {mark}
                     """,
                     [*values, limit, offset],

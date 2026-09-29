@@ -6,6 +6,8 @@ const state = {
   loadingRows: false,
   loadedUntil: 0,
   rowsRequestId: 0,
+  sort: "",
+  order: "asc",
 };
 
 const el = (id) => document.getElementById(id);
@@ -47,7 +49,43 @@ function params() {
   }
   query.set("limit", state.limit);
   query.set("offset", state.offset);
+  if (state.sort) {
+    query.set("sort", state.sort);
+    query.set("order", state.order);
+  }
   return query;
+}
+
+function renderSortIndicators() {
+  document.querySelectorAll("th[data-sort]").forEach((th) => {
+    const active = state.sort === th.dataset.sort;
+    const arrow = th.querySelector(".sort-arrow");
+    if (arrow) arrow.textContent = active ? (state.order === "asc" ? "▲" : "▼") : "⇅";
+    th.classList.toggle("is-sorted", active);
+    th.setAttribute("aria-sort", active ? (state.order === "asc" ? "ascending" : "descending") : "none");
+  });
+}
+
+async function changeSort(column) {
+  if (state.sort === column) {
+    state.order = state.order === "asc" ? "desc" : "asc";
+  } else {
+    state.sort = column;
+    state.order = "asc";
+  }
+  renderSortIndicators();
+  state.offset = 0;
+  state.loadedUntil = 0;
+  el("rows").innerHTML = "";
+  const tableWrap = document.querySelector(".table-wrap");
+  if (tableWrap) tableWrap.scrollTop = 0;
+  await loadRows();
+}
+
+function clearSort() {
+  state.sort = "";
+  state.order = "asc";
+  renderSortIndicators();
 }
 
 function totalPages() {
@@ -248,8 +286,17 @@ function bindEvents() {
   el("reset").addEventListener("click", () => {
     for (const id of filters) el(id).value = "";
     if (state.latestCollectedDate) el("collectedDate").value = state.latestCollectedDate;
+    clearSort();
     refresh(true);
   });
+  for (const th of document.querySelectorAll("th[data-sort]")) {
+    th.addEventListener("click", () => changeSort(th.dataset.sort));
+    th.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      changeSort(th.dataset.sort);
+    });
+  }
   el("prev").addEventListener("click", async () => {
     state.offset = Math.max(0, state.offset - state.limit);
     state.loadedUntil = 0;
@@ -273,6 +320,7 @@ async function boot() {
   try {
     bindEvents();
     await loadFacets();
+    renderSortIndicators();
     await refresh(true);
   } catch (error) {
     el("status").textContent = `加载失败: ${error.message || error}`;

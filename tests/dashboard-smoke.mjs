@@ -121,6 +121,93 @@ try {
     throw new Error(`expected infinite scroll to append rows, got ${initialRows} -> ${rowsAfterAutoLoad}`);
   }
 
+  // 国家 / 分类表头排序：点击后走服务端排序，回到第 1 页，再点一次切降序。
+  const sortRequests = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/trends" && url.searchParams.get("sort")) {
+      sortRequests.push(`${url.searchParams.get("sort")}:${url.searchParams.get("order")}`);
+    }
+  });
+  const firstColumnValue = async (columnIndex) =>
+    page.$eval(`#rows tr:first-child td:nth-child(${columnIndex + 1})`, (cell) => cell.textContent.trim());
+  const columnValues = async (columnIndex) =>
+    page.$$eval(
+      "#rows tr",
+      (rows, index) => rows.map((row) => row.children[index].textContent.trim()),
+      columnIndex
+    );
+  const expectSorted = async (columnIndex, direction, label) => {
+    try {
+      await page.waitForFunction(({ columnIndex, direction }) => {
+        const values = [...document.querySelectorAll("#rows tr")]
+          .map((row) => row.children[columnIndex]?.textContent.trim() ?? null);
+        if (values.length < 2 || values.some((value) => value === null)) return false;
+        return values.every((value, index) =>
+          index === 0 || (direction === "asc" ? values[index - 1] <= value : values[index - 1] >= value)
+        );
+      }, { columnIndex, direction });
+    } catch {
+      const values = await columnValues(columnIndex).catch(() => []);
+      throw new Error(`${label} rows are not sorted ${direction}: ${values.slice(0, 6).join(" | ")}`);
+    }
+    return columnValues(columnIndex);
+  };
+  const expectedSorted = await page.evaluate(async (date) => {
+    const firstRow = async (sort, order) => {
+      const response = await fetch(
+        `/api/trends?collected_date=${encodeURIComponent(date)}&sort=${sort}&order=${order}&limit=1`
+      );
+      return (await response.json()).rows[0];
+    };
+    return {
+      geoAsc: (await firstRow("geo", "asc")).geo,
+      geoDesc: (await firstRow("geo", "desc")).geo,
+      categoryAsc: (await firstRow("category", "asc")).category,
+    };
+  }, selectedDate);
+
+  await page.click('th[data-sort="geo"]');
+  await page.waitForFunction(() =>
+    document.querySelector('th[data-sort="geo"]')?.getAttribute("aria-sort") === "ascending" &&
+    document.querySelector("#pageJump")?.value === "1"
+  );
+  await expectSorted(3, "asc", "geo");
+  if ((await firstColumnValue(3)) !== expectedSorted.geoAsc) {
+    throw new Error(`geo asc first row mismatch: ${await firstColumnValue(3)} vs ${expectedSorted.geoAsc}`);
+  }
+
+  await page.click('th[data-sort="geo"]');
+  await page.waitForFunction(() =>
+    document.querySelector('th[data-sort="geo"]')?.getAttribute("aria-sort") === "descending"
+  );
+  await expectSorted(3, "desc", "geo");
+  if ((await firstColumnValue(3)) !== expectedSorted.geoDesc) {
+    throw new Error(`geo desc first row mismatch: ${await firstColumnValue(3)} vs ${expectedSorted.geoDesc}`);
+  }
+
+  await page.click('th[data-sort="category"]');
+  await page.waitForFunction(() =>
+    document.querySelector('th[data-sort="category"]')?.getAttribute("aria-sort") === "ascending" &&
+    document.querySelector('th[data-sort="geo"]')?.getAttribute("aria-sort") === "none"
+  );
+  await expectSorted(4, "asc", "category");
+  if ((await firstColumnValue(4)) !== expectedSorted.categoryAsc) {
+    throw new Error(`category asc first row mismatch: ${await firstColumnValue(4)} vs ${expectedSorted.categoryAsc}`);
+  }
+  for (const expected of ["geo:asc", "geo:desc", "category:asc"]) {
+    if (!sortRequests.includes(expected)) {
+      throw new Error(`expected ${expected} request, got ${JSON.stringify(sortRequests)}`);
+    }
+  }
+
+  await page.click("#reset");
+  await page.waitForFunction(() =>
+    document.querySelector('th[data-sort="category"]')?.getAttribute("aria-sort") === "none" &&
+    document.querySelector("#pageJump")?.value === "1" &&
+    document.querySelectorAll("#rows tr").length >= 80
+  );
+
   const targetPage = Math.min(12, Math.ceil(selectedDateSummary.rows / 80));
   const expectedStart = ((targetPage - 1) * 80) + 1;
   const expectedEnd = Math.min(targetPage * 80, selectedDateSummary.rows);
